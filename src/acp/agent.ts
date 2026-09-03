@@ -1404,7 +1404,22 @@ async function getThinkingState(
   const tl = typeof state?.thinkingLevel === 'string' ? state.thinkingLevel : null
   if (tl && isThinkingLevel(tl)) current = tl
 
-  const available: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+  const allLevels: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+  // Prefer the active model's own level map (pi exposes it via get_state.model.thinkingLevelMap,
+  // mirroring getSupportedThinkingLevels): null means unsupported; xhigh/max additionally require
+  // an explicit entry. Fall back to the full ladder when the map is unavailable.
+  const map = state?.model?.thinkingLevelMap
+  const available: ThinkingLevel[] =
+    map && typeof map === 'object'
+      ? allLevels.filter(level => {
+          const mapped = (map as Record<string, unknown>)[level]
+          if (mapped === null) return false // explicit null = unsupported
+          if (level === 'xhigh' || level === 'max') return mapped !== undefined
+          return true
+        })
+      : allLevels
+  if (!available.includes(current)) current = available[available.length - 1] ?? 'off'
 
   return {
     currentModeId: current,
