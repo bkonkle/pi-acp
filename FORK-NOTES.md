@@ -23,3 +23,9 @@ capped at high's thinking budget (gateway ignores adaptive effort there).
 
 models.json is currently set to the openai-completions override (max works,
 occasional truncated turn) — tradeoff is live.
+
+## Provenance
+
+Based on georgeharker/pi-acp v0.3.1 (MIT), which forks svkozak/pi-acp (MIT).
+Original work by Mario Zechner / pi-mono contributors via the coding-agent repo.
+Our changes (see commits above) are in the same license.
