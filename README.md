@@ -10,6 +10,9 @@ This is an MVP-style adapter intended to be useful today and easy to iterate on.
 
 Expect some minor breaking changes.
 
+Setting up a fresh machine? See [Setting up on a new machine](#setting-up-on-a-new-machine) — the
+checklist is written so an agent can follow it end to end.
+
 ## Differences from upstream
 
 This is a fork of [`svkozak/pi-acp`](https://github.com/svkozak/pi-acp), published to npm as
@@ -28,6 +31,14 @@ On top of upstream it adds:
 - **Subagents as ACP tasks** — a bundled pi extension bridges the
   [pi-subagents](https://github.com/tintinweb/pi-subagents) fleet into the ACP `plan` channel, so
   each subagent shows up as a task. See [Subagents as tasks](#subagents-as-tasks).
+- **Bundled pi extensions** — `todo-acp` and `auto-title` ship in this package and are loaded into
+  every spawned `pi` automatically (no user-level extension files needed). See
+  [Bundled pi extensions](#bundled-pi-extensions).
+- **ACP thread titles** — the `/name <title>` slash command sets the pi session name and pushes an
+  ACP `session_info_update`, which Zed applies to the thread title; the bundled `auto-title`
+  extension generates titles automatically. See [Bundled pi extensions](#bundled-pi-extensions).
+- **Thinking-level fixes** — thinking-level advertisement/filtering is matched to the active
+  model's `thinkingLevelMap` (upstream advertises levels some models don't support).
 - **MCP auto-configuration** — ACP `mcpServers` are translated into a generated `<cwd>/.pi/mcp.json`
   for [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) to load. See
   [MCP servers](#mcp-servers).
@@ -227,6 +238,94 @@ outside the adapter.
 ACP `PlanEntryStatus` has no `failed` value, so a failed subagent is shown as `completed` with a
 `(failed)` annotation.
 
+## Bundled pi extensions
+
+This fork ships three pi extensions. They are built to `dist/extensions/*.js` and the adapter loads
+them into every spawned `pi` process via `-e` (see `src/pi-rpc/process.ts`) — so installing this
+package is the only setup step; no user-level extension files are needed. Each one is gated to
+RPC/`PI_ACP=1` mode (inert in a normal terminal `pi`) and guards against double loading (the
+package's `pi.extensions` key and the adapter's `-e` flag may both apply).
+
+### `todo-acp` — TODO.md as the Zed todo checklist
+
+Track work in `TODO.md` at the project root using GitHub-style checkboxes:
+
+```markdown
+- [ ] pending task
+- [-] in-progress task
+- [x] done task
+```
+
+Whenever a tool writes `TODO.md`, the extension parses the checkboxes and appends an `acp:plan`
+custom entry; the adapter decodes it into an ACP `plan` update, which Zed renders as its native
+todo checklist. `TODO.md` stays the single source of truth — the panel is just a projection.
+
+### `auto-title` — automatic thread titles
+
+After the first agent run, and again every N runs (default 5), `auto-title` asks a cheap model for
+a conversation title and pushes it to the client as an ACP `session_info_update` — Zed applies it
+to the thread title. Titles follow the pattern:
+
+```
+<PR number if available> | <GH issue number if available> | <2-5 lowercase words>
+```
+
+Segments are omitted when unavailable (e.g. `142 | 87 | fix auth redirect loop`, or just
+`fix auth redirect loop`). PR/issue numbers are extracted from the conversation itself
+(`PR #123`, `fixes #45`, GitHub URLs).
+
+Manual names win: `/name <title>` (the adapter's slash command) sets the name, pushes the
+`session_info_update`, and locks auto-titling for that session (the lock survives resume). Renaming
+from Zed's UI is a client-side override Zed never reports to the agent — the override always wins
+for display, but the agent keeps titling the pi session underneath.
+
+The title model defaults to `zai/glm-5.3-flash` on the `vercel-ai-gateway` provider (see
+[Environment variables](#environment-variables) for `PI_AUTO_TITLE_MODEL`,
+`PI_AUTO_TITLE_PROVIDER`, and `PI_AUTO_TITLE_EVERY`). If the model isn't configured, titling is
+silently skipped (rate-limited warnings on the adapter's stderr).
+
+### `pi-extension` — subagent fleet bridging
+
+The [subagents-as-tasks](#subagents-as-tasks) bridge described above. Shipped as a package
+extension (`pi.extensions`) since before the `-e` mechanism; also bundled for `dist/` installs so
+subagent plans work from a source checkout without `pi install`.
+
+## Setting up on a new machine
+
+Checklist for reproducing the full setup (pi + this adapter + Zed + bundled extensions) on a fresh
+machine. Written so an agent can execute it; only the auth steps need a human.
+
+1. **Install pi and Node** — Node.js 22+, then `npm install -g @earendil-works/pi-coding-agent`.
+   Verify with `pi --version`.
+2. **Clone and build this package** —
+   ```bash
+   git clone git@github.com:bkonkle/pi-acp.git && cd pi-acp
+   npm install && npm run build
+   ```
+   Building produces `dist/index.js` (the adapter) and `dist/extensions/*.js` (the bundled pi
+   extensions, loaded automatically — no `pi install` and no user-level extension files needed).
+3. **Point Zed at the adapter** — add to `~/.config/zed/settings.json`:
+   ```json
+   "agent_servers": {
+     "pi-acp": {
+       "type": "custom",
+       "command": "node",
+       "args": ["/absolute/path/to/pi-acp/dist/index.js"]
+     }
+   }
+   ```
+4. **Authenticate pi (human step)** — run `pi` in a terminal and log in to your providers
+   (`/login` / `/model`). Auth material is per-machine; do not copy `~/.pi/agent/auth.json`.
+5. **Optional: title model** — `auto-title` defaults to `zai/glm-5.3-flash` via a
+   `vercel-ai-gateway` entry in `~/.pi/agent/models.json` (see [models](https://github.com/earendil-works/pi/blob/main/docs/models.md)).
+   Without it, auto-titling is skipped but everything else works; `/name` still sets titles
+   manually. If your models.json resolves the API key via a `!`-command, that script must exist on
+   this machine too.
+6. **Verify** — in this repo run `npm run smoke`. Expected on stdout: an `agent_message_chunk`
+   reply, an `acp:plan` snapshot (from `todo-acp`, this repo has a `TODO.md`), and a
+   `session_info_update` with a `title`. Then open a pi-acp thread in Zed and check that the
+   thread title changes from "New Agent Thread" after the first reply.
+
 ## Authentication (ACP Registry support)
 
 This agent supports **Terminal Auth** for the [ACP Registry](https://agentclientprotocol.com/get-started/registry).
@@ -252,7 +351,20 @@ npm run test
 Project layout:
 
 - `src/acp/*` – ACP server + translation layer
-- `src/pi-rpc/*` – pi subprocess wrapper (RPC protocol)
+- `src/pi-rpc/*` – pi subprocess wrapper (RPC protocol, incl. bundled-extension loading)
+- `src/extensions/*` – bundled pi extensions (`todo-acp`, `auto-title`), loaded into spawned pi via `-e`
+- `src/pi-extension.ts` – subagent-fleet→plan bridge (package extension, also bundled)
+- `test/unit`, `test/component` – unit tests and fake-driven adapter tests
+
+## Environment variables
+
+| Variable | Set by | Purpose |
+|----------|--------|---------|
+| `PI_ACP` | adapter → pi | Marks the spawned pi process as ACP-driven; activates the bundled extensions outside RPC mode. |
+| `PI_ACP_DATA_DIR` | you | Overrides the adapter's data directory (default `~/.pi/pi-acp/`). |
+| `PI_AUTO_TITLE_MODEL` | you | Model id used for generated titles (default `zai/glm-5.3-flash`). |
+| `PI_AUTO_TITLE_PROVIDER` | you | Provider id for the title model (default `vercel-ai-gateway`). |
+| `PI_AUTO_TITLE_EVERY` | you | Regenerate the title every N agent runs (default `5`; first run always titles). |
 
 ## Limitations
 
