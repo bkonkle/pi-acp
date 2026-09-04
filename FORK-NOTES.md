@@ -29,3 +29,23 @@ occasional truncated turn) — tradeoff is live.
 Based on georgeharker/pi-acp v0.3.1 (MIT), which forks svkozak/pi-acp (MIT).
 Original work by Mario Zechner / pi-mono contributors via the coding-agent repo.
 Our changes (see commits above) are in the same license.
+
+## 2026-09-05: deep Zed integration pass
+
+On top of georgeharker v0.3.1, this branch adds:
+
+- SDK bump @agentclientprotocol/sdk 0.26.0 -> 1.4.0 (stable v1 wire unchanged; 1.x is the line
+  that also carries the experimental v2 entry).
+- `usage_update` at turn end (from pi `get_session_stats` contextUsage + cost) and the UNSTABLE
+  `usage` block on `session/prompt` responses (Zed renders token/cost meters from these).
+- Stable `messageId` grouping on agent_message_chunk/agent_thought_chunk, reset on pi
+  `message_start` and at turn start.
+- pi extension `input`/`editor` dialogs bridge to ACP form `elicitation/create` when the client
+  advertises `elicitation.form` (Zed 1.12+); accept -> ui value, decline/cancel -> cancelled.
+  Older clients keep the cancel-with-note fallback.
+- Boolean config option `auto_compaction` (category model_config), advertised only when the
+  client sends `session.configOptions.boolean`; wired to pi's `set_auto_compaction`.
+- Debug-gated stderr log for unknown pi RPC event types (`PI_ACP_DEBUG`).
+
+Verified: `session/unload` does not exist in ACP v1 (SDK 1.4.0 AGENT_METHODS) — not a gap;
+`session/close` covers it.

@@ -7,7 +7,9 @@ import type {
   SessionUpdate,
   ToolCallContent,
   ToolCallLocation,
-  ToolKind
+  ToolKind,
+  Usage,
+  UsageUpdate
 } from '@agentclientprotocol/sdk'
 import { RequestError } from '@agentclientprotocol/sdk'
 import { readFileSync } from 'node:fs'
@@ -350,6 +352,18 @@ export class PiAcpSession {
   private bashToolCallIds = new Set<string>()
   private bashOutputSnapshots = new Map<string, string>()
 
+  // ACP messageId grouping: chunks belonging to the same assistant message share a messageId.
+  // pi's `message_start` event begins a new message; the id is assigned lazily on first chunk.
+  private currentMessageId: string | null = null
+  private messageCounter = 0
+
+  // Provider-reported cumulative usage from the latest pi `message_update`, and the
+  // ACP usage_update snapshot collected at the end of the last turn (also surfaced
+  // via PromptResponse.usage / _meta for clients that read it, e.g. Zed).
+  private latestProviderUsage: Record<string, unknown> | null = null
+  private lastUsageUpdate: UsageUpdate | null = null
+  private lastTurnUsage: Usage | null = null
+
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
@@ -509,6 +523,62 @@ export class PiAcpSession {
     return this.clientCapabilities?.terminal === true
   }
 
+  /** messageId for chunk grouping: stable within one assistant message, new per message. */
+  private nextMessageId(): string {
+    if (this.currentMessageId === null) {
+      this.currentMessageId = `m${++this.messageCounter}`
+    }
+    return this.currentMessageId
+  }
+
+  /**
+   * Ask pi for session stats and emit an ACP `usage_update` (context-window usage + cumulative
+   * cost) so clients like Zed can render token/cost meters. Also records a `Usage` snapshot for
+   * the next `session/prompt` response. Best-effort: never throws, never blocks turn completion.
+   */
+  private async collectUsageUpdate(): Promise<void> {
+    try {
+      const stats = (await this.proc.getSessionStats()) as any
+      const ctx = stats?.contextUsage
+
+      if (
+        ctx &&
+        typeof ctx.tokens === 'number' &&
+        typeof ctx.contextWindow === 'number' &&
+        ctx.contextWindow > 0
+      ) {
+        this.lastUsageUpdate = {
+          used: ctx.tokens,
+          size: ctx.contextWindow,
+          ...(typeof stats?.cost === 'number'
+            ? { cost: { amount: stats.cost, currency: 'USD' } }
+            : {})
+        }
+        this.emit({ sessionUpdate: 'usage_update', ...this.lastUsageUpdate })
+      }
+
+      const tokens = stats?.tokens
+      if (tokens && typeof tokens === 'object') {
+        this.lastTurnUsage = {
+          totalTokens: numberOrZero(tokens.total),
+          inputTokens: numberOrZero(tokens.input),
+          outputTokens: numberOrZero(tokens.output),
+          ...(typeof tokens.cacheRead === 'number' ? { cachedReadTokens: tokens.cacheRead } : {}),
+          ...(typeof tokens.cacheWrite === 'number' ? { cachedWriteTokens: tokens.cacheWrite } : {})
+        }
+      }
+    } catch {
+      // Stats are best-effort.
+    }
+  }
+
+  /** Usage snapshot for the last completed turn, for `PromptResponse.usage` (cleared on read). */
+  takeTurnUsage(): Usage | null {
+    const usage = this.lastTurnUsage
+    this.lastTurnUsage = null
+    return usage
+  }
+
   private emitBashToolCall(params: {
     sessionUpdate: 'tool_call' | 'tool_call_update'
     toolCallId: string
@@ -592,6 +662,7 @@ export class PiAcpSession {
 
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
+    this.currentMessageId = null
 
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
 
@@ -637,11 +708,18 @@ export class PiAcpSession {
       case 'message_update': {
         const ame = (ev as any).assistantMessageEvent
 
+        // Track cumulative provider usage (surfed into usage_update at turn end).
+        const usage = (ev as any).usage
+        if (usage && typeof usage === 'object') {
+          this.latestProviderUsage = usage
+        }
+
         // Stream assistant text.
         if (ame?.type === 'text_delta' && typeof ame.delta === 'string') {
           this.emit({
             sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: ame.delta } satisfies ContentBlock
+            content: { type: 'text', text: ame.delta } satisfies ContentBlock,
+            messageId: this.nextMessageId()
           })
           break
         }
@@ -649,7 +727,8 @@ export class PiAcpSession {
         if (ame?.type === 'thinking_delta' && typeof ame.delta === 'string') {
           this.emit({
             sessionUpdate: 'agent_thought_chunk',
-            content: { type: 'text', text: ame.delta } satisfies ContentBlock
+            content: { type: 'text', text: ame.delta } satisfies ContentBlock,
+            messageId: this.nextMessageId()
           })
           break
         }
@@ -957,10 +1036,23 @@ export class PiAcpSession {
         break
       }
 
+      case 'message_start': {
+        // A new assistant message began: the next chunk gets a fresh ACP messageId.
+        this.currentMessageId = null
+        break
+      }
+
+      case 'message_end': {
+        break
+      }
+
       case 'agent_settled': {
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
-        void this.flushEmits().finally(() => {
+        void this.flushEmits()
+          .then(() => this.collectUsageUpdate())
+          .then(() => this.flushEmits())
+          .finally(() => {
           const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
           this.pendingTurn?.resolve(reason)
           this.pendingTurn = null
@@ -968,9 +1060,11 @@ export class PiAcpSession {
           // Start next queued prompt, if any.
           const next = this.turnQueue.shift()
           if (next) {
+            this.currentMessageId = null
             this.emit({
               sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
+              content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` },
+              messageId: this.nextMessageId()
             })
             this.startTurn(next)
           } else {
@@ -984,6 +1078,9 @@ export class PiAcpSession {
       }
 
       default:
+        if (getPiAcpDebug()) {
+          process.stderr.write(`[pi-acp] unhandled pi RPC event: ${type}\n`)
+        }
         break
     }
   }
@@ -1006,14 +1103,7 @@ export class PiAcpSession {
     }
 
     if (method === 'input' || method === 'editor') {
-      this.emit({
-        sessionUpdate: 'agent_message_chunk',
-        content: {
-          type: 'text',
-          text: `Pi ${method} UI request is not supported in ACP yet; cancelling it.`
-        } satisfies ContentBlock
-      })
-      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      await this.handleExtensionTextInput(ev, id, method)
       return
     }
 
@@ -1089,6 +1179,60 @@ export class PiAcpSession {
         sessionUpdate: 'plan',
         entries: [...toCribPlanEntries(this.planState), ...toPlanEntries(this.subagentFleet.values())]
       })
+    }
+  }
+
+  /**
+   * Bridge pi extension `input`/`editor` dialogs to an ACP form elicitation when the client
+   * advertises `elicitation.form` (e.g. Zed 1.12+). Falls back to the old cancel-with-note
+   * behavior for clients without form support.
+   */
+  private async handleExtensionTextInput(ev: PiRpcEvent, id: string, method: 'input' | 'editor'): Promise<void> {
+    if (!this.clientCapabilities?.elicitation?.form) {
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: `Pi ${method} UI request is not supported in ACP yet; cancelling it.`
+        } satisfies ContentBlock
+      })
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      return
+    }
+
+    const title = stringProp(ev, 'title') ?? (method === 'editor' ? 'Edit text' : 'Pi needs your input')
+    const placeholder = stringProp(ev, 'placeholder')
+    const prefill = stringProp(ev, 'prefill')
+
+    const field = {
+      type: 'string' as const,
+      title: method === 'editor' ? 'Text' : (placeholder ?? 'Value'),
+      ...(method === 'input' && placeholder !== null ? { description: placeholder } : {}),
+      ...(method === 'editor' && prefill !== null ? { default: prefill } : {})
+    }
+
+    try {
+      const response = await this.conn.createElicitation({
+        sessionId: this.sessionId,
+        mode: 'form',
+        message: title,
+        requestedSchema: {
+          type: 'object',
+          properties: { text: field },
+          required: ['text']
+        }
+      })
+
+      if (response.action === 'accept') {
+        const content = (response as { content?: { text?: unknown } | null }).content
+        const value = content?.text
+        await this.proc.sendExtensionUiResponse({ id, value: typeof value === 'string' ? value : '' })
+      } else {
+        await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+      }
+    } catch {
+      // Client disappeared or rejected the request; cancel on pi's side so the extension unblocks.
+      await this.proc.sendExtensionUiResponse({ id, cancelled: true }).catch(() => {})
     }
   }
 
@@ -1170,6 +1314,10 @@ function extensionUiToolCall(id: string, ev: PiRpcEvent) {
 function stringProp(source: Record<string, unknown>, key: string): string | null {
   const value = source[key]
   return typeof value === 'string' ? value : null
+}
+
+function numberOrZero(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
 function optionIndex(optionId: string): number | null {

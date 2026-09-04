@@ -6,8 +6,12 @@ type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 export class FakeAgentSideConnection {
   readonly updates: SessionUpdateMsg[] = []
   readonly permissionRequests: unknown[] = []
+  readonly elicitationRequests: unknown[] = []
   nextPermissionResponse: { outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } } = {
     outcome: { outcome: 'selected', optionId: 'allow' }
+  }
+  nextElicitationResponse: { action: 'accept' | 'decline' | 'cancel'; content?: { text?: string } } = {
+    action: 'decline'
   }
 
   async sessionUpdate(msg: SessionUpdateMsg): Promise<void> {
@@ -19,6 +23,11 @@ export class FakeAgentSideConnection {
   ): Promise<{ outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } }> {
     this.permissionRequests.push(params)
     return this.nextPermissionResponse
+  }
+
+  async createElicitation(params: unknown): Promise<{ action: string; content?: { text?: string } }> {
+    this.elicitationRequests.push(params)
+    return this.nextElicitationResponse
   }
 }
 
@@ -77,6 +86,18 @@ export class FakePiRpcProcess {
   async getMessages(): Promise<any> {
     return { messages: [] }
   }
+
+  async getSessionStats(): Promise<any> {
+    return this.sessionStats
+  }
+
+  sessionStats: any = null
+
+  async setAutoCompaction(_enabled: boolean): Promise<void> {
+    this.autoCompactionCalls.push(_enabled)
+  }
+
+  readonly autoCompactionCalls: boolean[] = []
 }
 
 export function asAgentConn(conn: FakeAgentSideConnection): AgentSideConnection {

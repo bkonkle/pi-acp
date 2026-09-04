@@ -30,7 +30,8 @@ test('PiAcpSession: emits agent_message_chunk for text_delta', async () => {
   assert.equal(conn.updates[0]!.sessionId, 's1')
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_message_chunk',
-    content: { type: 'text', text: 'hi' }
+    content: { type: 'text', text: 'hi' },
+    messageId: 'm1'
   })
 })
 
@@ -58,7 +59,8 @@ test('PiAcpSession: emits agent_thought_chunk for thinking_delta', async () => {
   assert.equal(conn.updates[0]!.sessionId, 's1')
   assert.deepEqual(conn.updates[0]!.update, {
     sessionUpdate: 'agent_thought_chunk',
-    content: { type: 'text', text: 'thinking...' }
+    content: { type: 'text', text: 'thinking...' },
+    messageId: 'm1'
   })
 })
 
@@ -531,12 +533,12 @@ test('PiAcpSession: preserves ordering when auto_retry_start is interleaved with
   assert.deepEqual(
     conn.updates.map(u => u.update),
     [
-      { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'before ' } },
+      { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'before ' }, messageId: 'm1' },
       {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Retrying (attempt 1/2, waiting 2s)...' }
       },
-      { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'after' } }
+      { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'after' }, messageId: 'm1' }
     ]
   )
 })
@@ -964,4 +966,191 @@ test('PiAcpSession: defaults notify severity to info when notifyType is absent',
   assert.deepEqual((conn.updates[0]!.update as any)._meta, {
     piAcp: { notify: { level: 'info' } }
   })
+})
+
+test('PiAcpSession: assigns a fresh messageId after message_start', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'a' } })
+  proc.emit({ type: 'message_start', message: {} })
+  proc.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'b' } })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.deepEqual(
+    conn.updates.map(u => (u.update as any).messageId),
+    ['m1', 'm2']
+  )
+})
+
+test('PiAcpSession: emits usage_update from session stats on agent_settled', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = {
+    tokens: { input: 50000, output: 10000, cacheRead: 40000, cacheWrite: 5000, total: 105000 },
+    cost: 0.45,
+    contextUsage: { tokens: 60000, contextWindow: 200000, percent: 30 }
+  }
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'agent_settled' })
+  await new Promise(r => setTimeout(r, 0))
+  await new Promise(r => setTimeout(r, 0))
+
+  const usageUpdate = conn.updates.find(u => (u.update as any).sessionUpdate === 'usage_update')
+  assert.ok(usageUpdate)
+  assert.deepEqual(usageUpdate.update, {
+    sessionUpdate: 'usage_update',
+    used: 60000,
+    size: 200000,
+    cost: { amount: 0.45, currency: 'USD' }
+  })
+})
+
+test('PiAcpSession: omits usage_update when pi reports no contextUsage', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = { tokens: { input: 1, output: 1, total: 2 }, cost: 0 }
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'agent_settled' })
+  await new Promise(r => setTimeout(r, 0))
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.find(u => (u.update as any).sessionUpdate === 'usage_update'), undefined)
+})
+
+test('PiAcpSession: takeTurnUsage returns and clears the last turn usage snapshot', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  proc.sessionStats = {
+    tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 },
+    contextUsage: { tokens: 100, contextWindow: 1000, percent: 10 }
+  }
+
+  const session = new PiAcpSession({
+    sessionId: 's2',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+  proc.emit({ type: 'agent_settled' })
+  await new Promise(r => setTimeout(r, 0))
+  await new Promise(r => setTimeout(r, 0))
+
+  const first = (session as any).takeTurnUsage()
+  assert.deepEqual(first, {
+    totalTokens: 15,
+    inputTokens: 10,
+    outputTokens: 5,
+    cachedReadTokens: 0,
+    cachedWriteTokens: 0
+  })
+  assert.equal((session as any).takeTurnUsage(), null)
+})
+
+test('PiAcpSession: bridges input extension UI to a form elicitation when the client supports it', async () => {
+  const conn = new FakeAgentSideConnection()
+  conn.nextElicitationResponse = { action: 'accept', content: { text: 'user typed this' } }
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    clientCapabilities: { elicitation: { form: {} } } as any
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'ui-1',
+    method: 'input',
+    title: 'Enter a value',
+    placeholder: 'type something...'
+  } as any)
+
+  await new Promise(r => setTimeout(r, 0))
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.elicitationRequests.length, 1)
+  const req: any = conn.elicitationRequests[0]
+  assert.equal(req.sessionId, 's1')
+  assert.equal(req.mode, 'form')
+  assert.equal(req.message, 'Enter a value')
+  assert.deepEqual(req.requestedSchema.properties.text, {
+    type: 'string',
+    title: 'type something...',
+    description: 'type something...'
+  })
+
+  assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-1', value: 'user typed this' }])
+})
+
+test('PiAcpSession: bridges editor extension UI with prefill as the form default', async () => {
+  const conn = new FakeAgentSideConnection()
+  conn.nextElicitationResponse = { action: 'decline' }
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    clientCapabilities: { elicitation: { form: {} } } as any
+  })
+
+  proc.emit({
+    type: 'extension_ui_request',
+    id: 'ui-2',
+    method: 'editor',
+    title: 'Edit some text',
+    prefill: 'Line 1\nLine 2'
+  } as any)
+
+  await new Promise(r => setTimeout(r, 0))
+  await new Promise(r => setTimeout(r, 0))
+
+  const req: any = conn.elicitationRequests[0]
+  assert.equal(req.message, 'Edit some text')
+  assert.deepEqual(req.requestedSchema.properties.text, {
+    type: 'string',
+    title: 'Text',
+    default: 'Line 1\nLine 2'
+  })
+
+  // decline → cancelled on pi's side
+  assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-2', cancelled: true }])
 })

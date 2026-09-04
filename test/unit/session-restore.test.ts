@@ -43,6 +43,9 @@ test('PiAcpAgent: prompt auto-restores a missing session from SessionStore', asy
     async cancel() {},
     wasCancelRequested() {
       return false
+    },
+    takeTurnUsage() {
+      return null
     }
   }))
 
