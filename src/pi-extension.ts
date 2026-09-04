@@ -18,12 +18,16 @@
  * var required. `PI_ACP=1` is still honored as an explicit override. No user configuration; it just
  * works.
  *
+ * Loaded via the package `pi.extensions` key and/or the adapter's `-e` flag (see
+ * src/pi-rpc/process.ts) — the Symbol.for guard makes double loading a no-op.
+ *
  * Types are declared locally on purpose: pi-acp does not depend on `@earendil-works/pi-coding-agent`
  * (it drives pi over RPC). pi injects the real API at load time.
  */
 
 const CUSTOM_TYPE = 'acp:subagents'
 const PLAN_CUSTOM_TYPE = 'acp:plan'
+const LOAD_GUARD = Symbol.for('pi-acp.extension.subagent-plan')
 
 type BusHandler = (data: unknown) => void
 type HookHandler = (event: unknown, ctx: unknown) => void
@@ -42,6 +46,10 @@ function str(v: unknown): string | undefined {
 }
 
 export default function (pi: PiExtensionApi): void {
+  const g = globalThis as Record<symbol, unknown>
+  if (g[LOAD_GUARD]) return
+  g[LOAD_GUARD] = true
+
   // Bridge only when driven headless over RPC (an ACP adapter), not in the interactive TUI, where
   // these entries would be pointless clutter. `mode` is read from the session_start context (the
   // extension's own load runs before mode is set). `PI_ACP=1` remains an explicit override.

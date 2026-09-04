@@ -1,9 +1,45 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import * as readline from 'node:readline'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
+
+/**
+ * Bundled pi extensions shipped in this package and loaded into every spawned
+ * `pi` process via `-e` (see src/extensions/ for the newer ones). Each extension
+ * is gated to RPC/`PI_ACP=1` mode and guards against double loading, so it is
+ * harmless when ALSO installed as a pi package via the `pi.extensions` key.
+ */
+const BUNDLED_EXTENSIONS = ['pi-extension', 'todo-acp', 'auto-title'] as const
+
+/**
+ * Resolve `-e` arguments for the bundled pi extensions. Built output lives in
+ * `dist/` (`index.js`, `pi-extension.js`) and `dist/extensions/*.js` (tsup
+ * mirrors the `src/` tree); under tsx dev, `import.meta.url` points into
+ * `src/pi-rpc/` and the TypeScript sources live in `src/` and `src/extensions/`.
+ */
+export function bundledExtensionArgs(importMetaUrl: string = import.meta.url): string[] {
+  // Accept both file:// URLs (import.meta.url) and plain paths (tests).
+  const here = dirname(importMetaUrl.startsWith('file:') ? fileURLToPath(importMetaUrl) : importMetaUrl)
+  const args: string[] = []
+  for (const name of BUNDLED_EXTENSIONS) {
+    const candidates = [
+      join(here, 'extensions', `${name}.js`),
+      join(here, `${name}.js`),
+      join(here, '..', 'extensions', `${name}.ts`),
+      join(here, '..', `${name}.ts`)
+    ]
+    for (const path of candidates) {
+      if (existsSync(path)) {
+        args.push('-e', path)
+        break
+      }
+    }
+  }
+  return args
+}
 
 export class PiRpcSpawnError extends Error {
   /** Underlying spawn error code, e.g. ENOENT, EACCES */
@@ -198,7 +234,7 @@ export class PiRpcProcess {
     // - themes are irrelevant in rpc mode and can be noisy/slow to load.
     // Keep extensions + prompt templates enabled because ACP users may rely on them
     // (e.g. MCP extensions, prompt templates for workflows).
-    const args = ['--mode', 'rpc', '--no-themes']
+    const args = ['--mode', 'rpc', '--no-themes', ...bundledExtensionArgs()]
     if (params.sessionPath) args.push('--session', params.sessionPath)
     // pi treats unknown `--` flags as extension flags (no error in rpc mode); pi-mcp-adapter reads
     // `--mcp-config` from argv. This overrides only the adapter's pi-global source, not pi's config dir.

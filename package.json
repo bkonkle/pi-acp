@@ -38,11 +38,14 @@
   },
   "files": [
     "dist",
-    "src/pi-extension.ts"
+    "src/pi-extension.ts",
+    "src/extensions"
   ],
   "pi": {
     "extensions": [
-      "./src/pi-extension.ts"
+      "./src/pi-extension.ts",
+      "./src/extensions/todo-acp.ts",
+      "./src/extensions/auto-title.ts"
     ]
   },
   "scripts": {
