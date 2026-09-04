@@ -45,6 +45,10 @@ import {
   parsePlanEntry,
   toPlanEntries as toCribPlanEntries
 } from './plan-bridge.js'
+import { parseSessionTitleEntry } from './session-title.js'
+
+/** Custom entry type used by the user's auto-title pi extension (see session-title.ts). */
+const TITLE_CUSTOM_TYPE = 'acp:session_title'
 
 type SessionCreateParams = {
   cwd: string
@@ -1060,6 +1064,18 @@ export class PiAcpSession {
       const op = parsePlanEntry(e.data)
       if (!op) return
       changed = applyPlanEntry(this.planState, op)
+    } else if (e.customType === TITLE_CUSTOM_TYPE) {
+      // auto-title extension: surface the generated name as an ACP session_info_update
+      // (Zed applies it to the thread title). No plan state involved.
+      const title = parseSessionTitleEntry(e.data)
+      if (title) {
+        this.emit({
+          sessionUpdate: 'session_info_update',
+          title,
+          updatedAt: new Date().toISOString()
+        })
+      }
+      return
     }
 
     if (changed) {
