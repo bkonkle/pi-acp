@@ -4,11 +4,14 @@
  * adapter.
  *
  * How it works:
- *   - After the first agent run, and again every N runs (default 5), it asks a
- *     cheap model (default GLM-5.3-flash via the Vercel AI gateway) for a title
- *     in the form `<PR number> | <issue number> | <lowercase title>`, omitting
- *     unavailable segments, built from the first user message and the latest
- *     exchange.
+ *   - The first title is generated at the first `turn_end` — right after the
+ *     model's first response, seconds into the run — so even a long autonomous
+ *     run gets titled immediately (it never waits for `agent_end`, and the
+ *     generate call is async, never blocking the reply). It asks a cheap model
+ *     (default GLM-5.3-flash via the Vercel AI gateway) for a title in the form
+ *     `<PR number> | <issue number> | <lowercase title>`, omitting unavailable
+ *     segments, built from the first user message and the latest exchange.
+ *   - Refreshes every N completed runs (default 5) as the conversation evolves.
  *   - The title is set via `pi.setSessionName()` (so it also shows in pi's
  *     `/resume` picker) and appended as an `acp:session_title` custom entry.
  *     That entry crosses RPC as `entry_appended`; the pi-acp adapter decodes it
@@ -60,6 +63,7 @@ let api: ExtensionApi | null = null
 let active = false
 let busy = false
 let turns = 0
+let firstTitleDone = false
 let lastTitle = ''
 let lastManuallySet = ''
 let warnCount = 0
@@ -249,6 +253,7 @@ export default function (pi: ExtensionApi): void {
     active = mode === 'rpc' || process.env.PI_ACP === '1'
     turns = 0
     busy = false
+    firstTitleDone = false
     lastTitle = pi.getSessionName() ?? ''
     lastManuallySet = lastTitle
     if (active) restoreState(ctx)
@@ -271,10 +276,30 @@ export default function (pi: ExtensionApi): void {
     }
   })
 
+  pi.on('message_end', async (event, ctx) => {
+    if (!active || busy || firstTitleDone) return
+    // First title fires at the end of the first assistant message — the moment
+    // the model's first response lands, before any tools execute — so even a
+    // long autonomous run gets titled within seconds. The generate call is
+    // async and never blocks the agent's reply. (turn_end is not enough: pi
+    // runs tool executions inside the turn, so it can fire late.)
+    const role = (event as { message?: { role?: string } } | null)?.message?.role
+    if (role !== 'assistant') return
+    firstTitleDone = true
+    if (!lastTitle) {
+      busy = true
+      try {
+        await generateTitle(ctx)
+      } finally {
+        busy = false
+      }
+    }
+  })
+
   pi.on('agent_end', async (_event, ctx) => {
     if (!active || busy) return
     turns += 1
-    if (turns !== 1 && turns % everyN() !== 0) return
+    if (turns % everyN() !== 0) return
 
     busy = true
     try {
