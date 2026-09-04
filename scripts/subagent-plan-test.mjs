@@ -7,9 +7,6 @@ let sessionId = null
 let buffer = ''
 let planUpdates = 0
 const seenAgents = new Set()
-let promptDone = false
-let tailTimer = null
-
 child.stdout.setEncoding('utf8')
 child.stdout.on('data', chunk => {
   buffer += chunk
@@ -29,9 +26,8 @@ child.stdout.on('data', chunk => {
     }
 
     if (msg?.id === 3) {
-      promptDone = true
       // Give the background subagent a moment to emit its events, then exit.
-      tailTimer = setTimeout(() => {
+      setTimeout(() => {
         console.log(`\n=== plan updates: ${planUpdates}; agents seen: ${[...seenAgents].join(', ') || 'NONE'}`)
         child.kill('SIGTERM')
         setTimeout(() => process.exit(0), 200)
