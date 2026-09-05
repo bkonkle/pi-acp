@@ -75,6 +75,7 @@ type AdvertisedModel = {
 
 const MODEL_CONFIG_ID = 'model'
 const THOUGHT_LEVEL_CONFIG_ID = 'thought_level'
+const AUTO_COMPACTION_CONFIG_ID = 'auto_compaction'
 
 function builtinAvailableCommands(): AvailableCommand[] {
   return [
@@ -406,10 +407,11 @@ export class PiAcpAgent implements ACPAgent {
       )
     }
 
-    const { configOptions, models, modes } = await getSessionConfiguration(session.proc, {
-      state,
-      availableModels
-    })
+    const { configOptions, models, modes } = await getSessionConfiguration(
+      session.proc,
+      { state, availableModels },
+      { clientCapabilities: this.clientCapabilities }
+    )
 
     const quietStartup = getQuietStartup(params.cwd)
     const updateNotice = buildUpdateNotice()
@@ -954,7 +956,10 @@ export class PiAcpAgent implements ACPAgent {
     const stopReason: StopReason =
       result === 'error' ? (session.wasCancelRequested() ? 'cancelled' : 'end_turn') : result
 
-    return { stopReason }
+    // Surface per-turn token usage (UNSTABLE PromptResponse.usage; Zed reads this).
+    const usage = session.takeTurnUsage()
+
+    return { stopReason, ...(usage ? { usage } : {}) }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -1150,7 +1155,9 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const { configOptions, models, modes } = await getSessionConfiguration(proc)
+    const { configOptions, models, modes } = await getSessionConfiguration(proc, undefined, {
+      clientCapabilities: this.clientCapabilities
+    })
 
     const response = {
       configOptions,
@@ -1256,7 +1263,9 @@ export class PiAcpAgent implements ACPAgent {
 
     ;(this.sessions as any).closeAllExcept?.(session.sessionId, preexistingSessionIds)
 
-    const { configOptions, modes } = await getSessionConfiguration(proc)
+    const { configOptions, modes } = await getSessionConfiguration(proc, undefined, {
+      clientCapabilities: this.clientCapabilities
+    })
 
     // Advertise slash commands after the response so the client knows the session exists.
     setTimeout(() => {
@@ -1335,7 +1344,7 @@ export class PiAcpAgent implements ACPAgent {
       }
     })
 
-    await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc, this.clientCapabilities)
 
     return {}
   }
@@ -1344,31 +1353,44 @@ export class PiAcpAgent implements ACPAgent {
     const session = await this.restoreSession(params.sessionId)
     const configId = String(params.configId)
 
-    if (typeof params.value !== 'string') {
-      throw RequestError.invalidParams(`Expected string value for config option: ${configId}`)
-    }
-
-    if (configId === MODEL_CONFIG_ID) {
-      await setSessionModel(session.proc, params.value)
-    } else if (configId === THOUGHT_LEVEL_CONFIG_ID) {
-      if (!isThinkingLevel(params.value)) {
-        throw RequestError.invalidParams(`Unknown thinking level: ${params.value}`)
+    if (configId === AUTO_COMPACTION_CONFIG_ID) {
+      if (typeof params.value !== 'boolean') {
+        throw RequestError.invalidParams(`Expected boolean value for config option: ${configId}`)
       }
 
-      await session.proc.setThinkingLevel(params.value)
-
-      void this.conn.sessionUpdate({
-        sessionId: session.sessionId,
-        update: {
-          sessionUpdate: 'current_mode_update',
-          currentModeId: params.value
-        }
-      })
+      await session.proc.setAutoCompaction(params.value)
     } else {
-      throw RequestError.invalidParams(`Unknown config option: ${configId}`)
+      if (typeof params.value !== 'string') {
+        throw RequestError.invalidParams(`Expected string value for config option: ${configId}`)
+      }
+
+      if (configId === MODEL_CONFIG_ID) {
+        await setSessionModel(session.proc, params.value)
+      } else if (configId === THOUGHT_LEVEL_CONFIG_ID) {
+        if (!isThinkingLevel(params.value)) {
+          throw RequestError.invalidParams(`Unknown thinking level: ${params.value}`)
+        }
+
+        await session.proc.setThinkingLevel(params.value)
+
+        void this.conn.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'current_mode_update',
+            currentModeId: params.value
+          }
+        })
+      } else {
+        throw RequestError.invalidParams(`Unknown config option: ${configId}`)
+      }
     }
 
-    const configOptions = await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    const configOptions = await emitConfigOptionsUpdate(
+      this.conn,
+      session.sessionId,
+      session.proc,
+      this.clientCapabilities
+    )
     return { configOptions }
   }
 }
@@ -1433,7 +1455,8 @@ async function getThinkingState(
 
 async function getSessionConfiguration(
   proc: PiRpcProcess,
-  pre?: { state?: any | null; availableModels?: any | null }
+  pre?: { state?: any | null; availableModels?: any | null },
+  opts?: { clientCapabilities?: ClientCapabilities }
 ): Promise<{
   configOptions: SessionConfigOption[]
   models: {
@@ -1449,12 +1472,40 @@ async function getSessionConfiguration(
     currentModeId: string
   }
 }> {
-  const [models, modes] = await Promise.all([getModelState(proc, pre), getThinkingState(proc, { state: pre?.state })])
+  // Fetch pi state once (when not pre-supplied) so model/thinking/boolean state share one RPC.
+  const state = pre?.state ?? (await safeGetState(proc))
+  const [models, modes] = await Promise.all([
+    getModelState(proc, { state, availableModels: pre?.availableModels }),
+    getThinkingState(proc, { state })
+  ])
+
+  // Boolean config options require explicit client support
+  // (ClientCapabilities.session.configOptions.boolean, e.g. recent Zed).
+  const booleans: SessionConfigOption[] = opts?.clientCapabilities?.session?.configOptions?.boolean
+    ? [
+        {
+          type: 'boolean',
+          id: AUTO_COMPACTION_CONFIG_ID,
+          category: 'model_config',
+          name: 'Auto-compaction',
+          description: 'Automatically compact the conversation when the context window fills',
+          currentValue: state?.autoCompactionEnabled !== false
+        }
+      ]
+    : []
 
   return {
-    configOptions: buildConfigOptions({ models, modes }),
+    configOptions: buildConfigOptions({ models, modes, booleans }),
     models,
     modes
+  }
+}
+
+async function safeGetState(proc: PiRpcProcess): Promise<any | null> {
+  try {
+    return (await proc.getState()) as any
+  } catch {
+    return null
   }
 }
 
@@ -1471,6 +1522,7 @@ function buildConfigOptions(state: {
     }>
     currentModeId: string
   }
+  booleans?: SessionConfigOption[]
 }): SessionConfigOption[] {
   const configOptions: SessionConfigOption[] = [
     {
@@ -1503,6 +1555,8 @@ function buildConfigOptions(state: {
       }))
     })
   }
+
+  configOptions.push(...(state.booleans ?? []))
 
   return configOptions
 }
@@ -1577,9 +1631,10 @@ async function getModelState(
 async function emitConfigOptionsUpdate(
   conn: AgentSideConnection,
   sessionId: string,
-  proc: PiRpcProcess
+  proc: PiRpcProcess,
+  clientCapabilities?: ClientCapabilities
 ): Promise<SessionConfigOption[]> {
-  const { configOptions } = await getSessionConfiguration(proc)
+  const { configOptions } = await getSessionConfiguration(proc, undefined, { clientCapabilities })
 
   await conn.sessionUpdate({
     sessionId,
