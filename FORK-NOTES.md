@@ -78,6 +78,10 @@ Not yet on the v2 path (deferred): unified message IDs per the full B6 semantics
 diffs (B6), elicitation create/complete round-trip re-verification under v2 zod (params are
 passed through; v2 request shapes differ slightly, e.g. required `title` on request_permission).
 
+Live harness: `node scripts/v2-smoke.mjs` (from the repo root, after `npm run build`) drives a
+full v2 turn over stdio — initialize(2) -> session/new -> prompt -> state_update running -> idle —
+and exits 0 on success.
+
 Known wire caveat: v2 config options advertise `currentValue` from pi state at session start;
 `providers/*`, `auth/login`, `nes/*`, document sync, and forking are unimplemented (v1 agent
 ignores them too).
