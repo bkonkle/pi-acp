@@ -47,6 +47,11 @@ On top of upstream it adds (including George Harker's changes):
   (`sessionCapabilities.additionalDirectories`), communicated to pi via `--append-system-prompt`.
 - **v2-oriented session capabilities** — advertises `session/resume`, `session/close`, and
   `mcpCapabilities.http` (steps toward ACP v2 parity; see `docs/v2-parity-and-mcp-plan.md`).
+- **Experimental ACP v2 draft agent** — off by default; set `"enableV2": true` in pi-acp.json to
+  serve the ACP v2 draft behind the SDK's dual-version router (v1 clients unaffected). The v2
+  path delegates to the same session engine and translates the v2 wire differences (async prompt
+  with `state_update` lifecycle, `replayFrom` resume, typed config-option values, `plan_update`,
+  `configId` naming, required chunk `messageId`s). See `FORK-NOTES.md` for scope and caveats.
 - **`PI_ACP_DATA_DIR`** — env override for the adapter's own data directory (see
   [Environment variables](#environment-variables)).
 

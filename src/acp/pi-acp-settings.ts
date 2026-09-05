@@ -19,6 +19,8 @@ type PiAcpSettings = {
   rpcTimeoutMs: number
   /** Emit adapter debug logging to stderr. */
   debug: boolean
+  /** Serve the experimental ACP v2 draft agent behind the dual-version router. Default: off. */
+  enableV2: boolean
   /** Override the pi executable. Absent = platform default (`pi`, or `pi.cmd` on Windows). */
   piCommand?: string
   /** Override pi-acp's data directory. Absent = `~/.pi/pi-acp`. */
@@ -29,7 +31,8 @@ type PiAcpSettings = {
 const DEFAULT_PI_ACP_SETTINGS: PiAcpSettings = {
   embeddedContext: true,
   rpcTimeoutMs: 120_000,
-  debug: false
+  debug: false,
+  enableV2: false
 }
 
 /** pi-acp's own settings file, in pi's `extensions/` dir so it follows a relocated config dir. */
@@ -69,7 +72,8 @@ function readPiAcpSettings(path: string = resolvePiAcpSettingsReadPath()): PiAcp
         typeof data.rpcTimeoutMs === 'number' && Number.isFinite(data.rpcTimeoutMs) && data.rpcTimeoutMs > 0
           ? data.rpcTimeoutMs
           : DEFAULT_PI_ACP_SETTINGS.rpcTimeoutMs,
-      debug: typeof data.debug === 'boolean' ? data.debug : DEFAULT_PI_ACP_SETTINGS.debug
+      debug: typeof data.debug === 'boolean' ? data.debug : DEFAULT_PI_ACP_SETTINGS.debug,
+      enableV2: typeof data.enableV2 === 'boolean' ? data.enableV2 : DEFAULT_PI_ACP_SETTINGS.enableV2
     }
     if (typeof data.piCommand === 'string' && data.piCommand.trim()) out.piCommand = data.piCommand
     if (typeof data.dataDir === 'string' && data.dataDir.trim()) out.dataDir = data.dataDir
@@ -89,6 +93,11 @@ export function getRpcTimeoutMs(): number {
 
 export function getPiAcpDebug(): boolean {
   return readPiAcpSettings().debug
+}
+
+/** Experimental: serve the ACP v2 draft agent behind the dual-version router. */
+export function getPiAcpEnableV2(): boolean {
+  return readPiAcpSettings().enableV2
 }
 
 export function getPiCommandOverride(): string | undefined {

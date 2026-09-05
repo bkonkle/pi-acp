@@ -1,7 +1,9 @@
 import { AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk'
+import { agentProtocolRouter } from '@agentclientprotocol/sdk/experimental/v2'
 import { PiAcpAgent } from './acp/agent.js'
 import { getPiCommand, shouldUseShellForPiCommand } from './pi-rpc/command.js'
-import { getPiCommandOverride } from './acp/pi-acp-settings.js'
+import { getPiCommandOverride, getPiAcpEnableV2 } from './acp/pi-acp-settings.js'
+import { buildV2Agent } from './acp/v2/agent.js'
 // Terminal Auth entrypoint. The ACP client launches the agent with `--terminal-login`.
 if (process.argv.includes('--terminal-login')) {
   const { spawnSync } = await import('node:child_process')
@@ -50,12 +52,37 @@ const output = new ReadableStream<Uint8Array>({
 
 const stream = ndJsonStream(input, output)
 
-const agent = new AgentSideConnection(conn => new PiAcpAgent(conn), stream)
+/** What the entrypoint binds for shutdown; set by whichever serving path runs. */
+let serve: { dispose?: () => void } | null = null
+
+if (getPiAcpEnableV2()) {
+  // Experimental: dual-version router. v1 clients get today's behavior unchanged; v2 (draft)
+  // clients negotiate protocolVersion 2 and are served by the delegating v2 agent.
+  const router = agentProtocolRouter()
+    .withV1({
+      connect: (s: never) => {
+        const conn = new AgentSideConnection(c => new PiAcpAgent(c), s as never)
+        serve = conn as unknown as { dispose?: () => void }
+        return {}
+      }
+    })
+    .withV2({
+      connect: (s: never) => {
+        const conn = buildV2Agent().connect(s as never)
+        serve = conn as unknown as { dispose?: () => void }
+        return conn
+      }
+    })
+  router.connect(stream as never)
+} else {
+  const agent = new AgentSideConnection(conn => new PiAcpAgent(conn), stream)
+  serve = agent as unknown as { dispose?: () => void }
+}
 
 function shutdown() {
   try {
     // Best-effort: dispose session subprocesses when the client disconnects.
-    ;(agent as any)?.agent?.dispose?.()
+    ;(serve as any)?.agent?.dispose?.()
   } catch {
     // ignore
   }

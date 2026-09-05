@@ -43,7 +43,8 @@ test('initialize writes a default pi-acp.json in the extensions dir when absent'
   assert.deepEqual(JSON.parse(readFileSync(p, 'utf-8')), {
     embeddedContext: true,
     rpcTimeoutMs: 120000,
-    debug: false
+    debug: false,
+    enableV2: false
   })
 })
 
