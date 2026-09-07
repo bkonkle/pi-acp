@@ -126,6 +126,8 @@ type SpawnParams = {
   mcpConfigPath?: string
   /** Per-request RPC timeout (ms). Falls back to {@link DEFAULT_RPC_TIMEOUT_MS} when unset. */
   rpcTimeoutMs?: number
+  /** Provider/model selected at process startup. */
+  defaultModel?: { provider: string; model: string }
 }
 
 /**
@@ -235,6 +237,9 @@ export class PiRpcProcess {
     // Keep extensions + prompt templates enabled because ACP users may rely on them
     // (e.g. MCP extensions, prompt templates for workflows).
     const args = ['--mode', 'rpc', '--no-themes', ...bundledExtensionArgs()]
+    if (params.defaultModel) {
+      args.push('--provider', params.defaultModel.provider, '--model', params.defaultModel.model)
+    }
     if (params.sessionPath) args.push('--session', params.sessionPath)
     // pi treats unknown `--` flags as extension flags (no error in rpc mode); pi-mcp-adapter reads
     // `--mcp-config` from argv. This overrides only the adapter's pi-global source, not pi's config dir.

@@ -30,7 +30,7 @@ import {
   isBashTool
 } from './translate/bash.js'
 import { toolResultToText } from './translate/pi-tools.js'
-import { getPiAcpDebug } from './pi-acp-settings.js'
+import { getDefaultModel, getPiAcpDebug } from './pi-acp-settings.js'
 import {
   SUBAGENT_PLAN_CUSTOM_TYPE,
   SUBAGENT_RECORD_CUSTOM_TYPE,
@@ -243,7 +243,8 @@ export class SessionManager {
         piCommand: params.piCommand,
         additionalDirectories: params.additionalDirectories,
         mcpConfigPath: params.mcpConfigPath,
-        rpcTimeoutMs: params.rpcTimeoutMs
+        rpcTimeoutMs: params.rpcTimeoutMs,
+        defaultModel: getDefaultModel()
       })
     } catch (e) {
       if (e instanceof PiRpcSpawnError) {

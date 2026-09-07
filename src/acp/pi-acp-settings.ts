@@ -10,7 +10,7 @@ import { getAgentDir } from './pi-settings.js'
  * a fallback (see {@link getLegacyPiAcpSettingsPath}).
  *
  * This is the single source of configuration for the adapter: there are no environment-variable
- * overrides. Optional keys (`piCommand`, `dataDir`) fall back to a built-in default when absent.
+ * overrides. Optional keys fall back to a built-in default when absent.
  */
 type PiAcpSettings = {
   /** Advertise ACP `promptCapabilities.embeddedContext` to the client. Default: on. */
@@ -25,6 +25,10 @@ type PiAcpSettings = {
   piCommand?: string
   /** Override pi-acp's data directory. Absent = `~/.pi/pi-acp`. */
   dataDir?: string
+  /** Provider selected for new ACP sessions. Both model fields must be set to take effect. */
+  defaultProvider?: string
+  /** Model selected for new ACP sessions. Both model fields must be set to take effect. */
+  defaultModel?: string
 }
 
 /** Defaults, also the exact object written by {@link ensurePiAcpSettingsFile}. */
@@ -77,6 +81,10 @@ function readPiAcpSettings(path: string = resolvePiAcpSettingsReadPath()): PiAcp
     }
     if (typeof data.piCommand === 'string' && data.piCommand.trim()) out.piCommand = data.piCommand
     if (typeof data.dataDir === 'string' && data.dataDir.trim()) out.dataDir = data.dataDir
+    if (typeof data.defaultProvider === 'string' && data.defaultProvider.trim()) {
+      out.defaultProvider = data.defaultProvider.trim()
+    }
+    if (typeof data.defaultModel === 'string' && data.defaultModel.trim()) out.defaultModel = data.defaultModel.trim()
     return out
   } catch {
     return { ...DEFAULT_PI_ACP_SETTINGS }
@@ -106,6 +114,13 @@ export function getPiCommandOverride(): string | undefined {
 
 export function getPiAcpDataDir(): string | undefined {
   return readPiAcpSettings().dataDir
+}
+
+export function getDefaultModel(): { provider: string; model: string } | undefined {
+  const settings = readPiAcpSettings()
+  if (!settings.defaultProvider || !settings.defaultModel) return undefined
+
+  return { provider: settings.defaultProvider, model: settings.defaultModel }
 }
 
 /**
