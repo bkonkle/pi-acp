@@ -38,8 +38,6 @@ On top of upstream it adds (including George Harker's changes):
 - **Elicitation bridge** — pi extension `input`/`editor` dialogs are bridged to ACP form
   `elicitation/create` when the client advertises `elicitation.form` (Zed 1.12+); other clients
   keep the cancel-with-note fallback.
-- **Boolean config option** — an `auto_compaction` toggle appears in clients that support
-  boolean config options (`session.configOptions.boolean`), wired to pi's auto-compaction.
 - **MCP auto-configuration** — ACP `mcpServers` are translated into a generated `<cwd>/.pi/mcp.json`
   for [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) to load. See
   [MCP servers](#mcp-servers).
@@ -61,8 +59,7 @@ On top of upstream it adds (including George Harker's changes):
 - Emits ACP `usage_update` after each turn (context-window tokens, cumulative cost) and a per-turn
   `usage` block on `session/prompt` responses, for clients that render token/cost meters
 - Bridges pi extension `input`/`editor` UI dialogs to ACP form elicitations when the client
-  supports them (`elicitation.form`); exposes an `auto_compaction` boolean config option to
-  clients that support boolean config options
+  supports them (`elicitation.form`)
 - Maps pi tool execution to ACP `tool_call` / `tool_call_update`
   - Tool call locations are surfaced when available for ACP clients that support opening the referenced file/context
   - Relative file paths from pi are resolved against the session cwd before being emitted as ACP tool locations, which enables follow-along features in clients like Zed

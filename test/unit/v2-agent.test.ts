@@ -1,7 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import * as v2 from '@agentclientprotocol/sdk/experimental/v2'
-import type { AgentSideConnection } from '@agentclientprotocol/sdk'
 import { buildV2Agent, type V1ConnShim } from '../../src/acp/v2/agent.js'
 import type { PiAcpAgent } from '../../src/acp/agent.js'
 
@@ -19,7 +18,18 @@ function makeV1Stub(overrides: Partial<Record<string, unknown>> = {}) {
     },
     newSession: async (params: unknown) => {
       calls.push({ method: 'newSession', params })
-      return { sessionId: 's1', configOptions: [{ type: 'select', id: 'model', name: 'Model', currentValue: 'test/beta', options: [{ value: 'test/beta', name: 'Beta' }] }] }
+      return {
+        sessionId: 's1',
+        configOptions: [
+          {
+            type: 'select',
+            id: 'model',
+            name: 'Model',
+            currentValue: 'test/beta',
+            options: [{ value: 'test/beta', name: 'Beta' }]
+          }
+        ]
+      }
     },
     prompt: async (params: unknown) => {
       calls.push({ method: 'prompt', params })
@@ -68,7 +78,7 @@ function connect(deps?: Parameters<typeof buildV2Agent>[0]) {
 }
 
 test('v2 agent: initialize negotiates protocolVersion 2 and maps client capabilities', async () => {
-  const { agentApp, clientApp } = connect()
+  const { clientApp } = connect()
   const initParams: unknown[] = []
 
   const agentApp2 = buildV2Agent({
@@ -103,10 +113,22 @@ test('v2 agent: session/new maps to the v1 agent and returns sessionId + configO
   const clientApp = v2.client()
 
   await clientApp.connectWith(agentApp, async ctx => {
-    await ctx.request('initialize', { protocolVersion: 2, info: { name: 'test-client', version: '0' }, capabilities: { elicitation: { form: {} } } })
+    await ctx.request('initialize', {
+      protocolVersion: 2,
+      info: { name: 'test-client', version: '0' },
+      capabilities: { elicitation: { form: {} } }
+    })
     const res: any = await ctx.request('session/new', { cwd: '/tmp' })
     assert.equal(res.sessionId, 's1')
-    assert.deepEqual(res.configOptions, [{ type: 'select', configId: 'model', name: 'Model', currentValue: 'test/beta', options: [{ value: 'test/beta', name: 'Beta' }] }])
+    assert.deepEqual(res.configOptions, [
+      {
+        type: 'select',
+        configId: 'model',
+        name: 'Model',
+        currentValue: 'test/beta',
+        options: [{ value: 'test/beta', name: 'Beta' }]
+      }
+    ])
     // v1-only response fields are dropped on the v2 surface.
     assert.equal(res.models, undefined)
     assert.equal(res.modes, undefined)
@@ -129,7 +151,11 @@ test('v2 agent: prompt accepts immediately and reports running -> idle state_upd
   })
 
   await clientApp.connectWith(agentApp, async ctx => {
-    await ctx.request('initialize', { protocolVersion: 2, info: { name: 'test-client', version: '0' }, capabilities: { elicitation: { form: {} } } })
+    await ctx.request('initialize', {
+      protocolVersion: 2,
+      info: { name: 'test-client', version: '0' },
+      capabilities: { elicitation: { form: {} } }
+    })
     await ctx.request('session/new', { cwd: '/tmp' })
     const promptRes: any = await ctx.request('session/prompt', {
       sessionId: 's1',
@@ -166,7 +192,11 @@ test('v2 agent: resume with replayFrom start routes to v1 loadSession, without t
   const clientApp = v2.client()
 
   await clientApp.connectWith(agentApp, async ctx => {
-    await ctx.request('initialize', { protocolVersion: 2, info: { name: 'test-client', version: '0' }, capabilities: { elicitation: { form: {} } } })
+    await ctx.request('initialize', {
+      protocolVersion: 2,
+      info: { name: 'test-client', version: '0' },
+      capabilities: { elicitation: { form: {} } }
+    })
     await ctx.request('session/resume', { sessionId: 's1', cwd: '/tmp', replayFrom: { type: 'start' } })
     await ctx.request('session/resume', { sessionId: 's1', cwd: '/tmp' })
   })
@@ -183,10 +213,14 @@ test('v2 agent: set_config_option passes configId and typed value through to v1'
   const clientApp = v2.client()
 
   await clientApp.connectWith(agentApp, async ctx => {
-    await ctx.request('initialize', { protocolVersion: 2, info: { name: 'test-client', version: '0' }, capabilities: { elicitation: { form: {} } } })
+    await ctx.request('initialize', {
+      protocolVersion: 2,
+      info: { name: 'test-client', version: '0' },
+      capabilities: { elicitation: { form: {} } }
+    })
     await ctx.request('session/set_config_option', {
       sessionId: 's1',
-      configId: 'auto_compaction',
+      configId: 'some_boolean_option',
       value: false,
       type: 'boolean'
     })
@@ -199,7 +233,7 @@ test('v2 agent: set_config_option passes configId and typed value through to v1'
   })
 
   const opts = calls.filter(c => c.method === 'setSessionConfigOption')
-  assert.deepEqual(opts[0]!.params, { sessionId: 's1', configId: 'auto_compaction', value: false })
+  assert.deepEqual(opts[0]!.params, { sessionId: 's1', configId: 'some_boolean_option', value: false })
   assert.deepEqual(opts[1]!.params, { sessionId: 's1', configId: 'model', value: 'test/beta' })
 })
 
@@ -209,7 +243,11 @@ test('v2 agent: lifecycle methods (list/delete/close/cancel/logout) delegate to 
   const clientApp = v2.client()
 
   await clientApp.connectWith(agentApp, async ctx => {
-    await ctx.request('initialize', { protocolVersion: 2, info: { name: 'test-client', version: '0' }, capabilities: { elicitation: { form: {} } } })
+    await ctx.request('initialize', {
+      protocolVersion: 2,
+      info: { name: 'test-client', version: '0' },
+      capabilities: { elicitation: { form: {} } }
+    })
     await ctx.request('session/list', {})
     await ctx.request('session/delete', { sessionId: 's1' })
     await ctx.request('session/close', { sessionId: 's1' })
@@ -219,14 +257,10 @@ test('v2 agent: lifecycle methods (list/delete/close/cancel/logout) delegate to 
 
   await new Promise(r => setTimeout(r, 10))
 
-  assert.deepEqual(calls.map(c => c.method), [
-    'initialize',
-    'listSessions',
-    'deleteSession',
-    'closeSession',
-    'cancel',
-    'logout'
-  ])
+  assert.deepEqual(
+    calls.map(c => c.method),
+    ['initialize', 'listSessions', 'deleteSession', 'closeSession', 'cancel', 'logout']
+  )
 })
 
 test('v2 agent: conn shim bridges session updates, permissions, and elicitations onto the v2 context', async () => {
@@ -250,8 +284,15 @@ test('v2 agent: conn shim bridges session updates, permissions, and elicitations
   })
 
   await clientApp.connectWith(agentApp, async ctx => {
-    await ctx.request('initialize', { protocolVersion: 2, info: { name: 'test-client', version: '0' }, capabilities: { elicitation: { form: {} } } })
-    await shim!.sessionUpdate({ sessionId: 's1', update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } } } as any)
+    await ctx.request('initialize', {
+      protocolVersion: 2,
+      info: { name: 'test-client', version: '0' },
+      capabilities: { elicitation: { form: {} } }
+    })
+    await shim!.sessionUpdate({
+      sessionId: 's1',
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } }
+    } as any)
   })
 
   await new Promise(r => setTimeout(r, 10))
@@ -294,12 +335,15 @@ test('v2 agent: plan updates translate to plan_update and config options to conf
       sessionId: 's1',
       update: {
         sessionUpdate: 'config_option_update',
-        configOptions: [{ type: 'boolean', id: 'auto_compaction', name: 'Auto-compaction', currentValue: true }]
+        configOptions: [{ type: 'select', id: 'model', name: 'Model', currentValue: 'test/beta', options: [] }]
       }
     } as any)
 
     // v1 `current_mode_update` has no v2 equivalent -> dropped.
-    await shim!.sessionUpdate({ sessionId: 's1', update: { sessionUpdate: 'current_mode_update', currentModeId: 'high' } } as any)
+    await shim!.sessionUpdate({
+      sessionId: 's1',
+      update: { sessionUpdate: 'current_mode_update', currentModeId: 'high' }
+    } as any)
   })
 
   await new Promise(r => setTimeout(r, 10))
@@ -312,8 +356,11 @@ test('v2 agent: plan updates translate to plan_update and config options to conf
 
   const configUpdate = updates.find(u => u.update?.sessionUpdate === 'config_option_update')
   assert.ok(configUpdate)
-  assert.equal(configUpdate.update.configOptions[0]!.configId, 'auto_compaction')
+  assert.equal(configUpdate.update.configOptions[0]!.configId, 'model')
   assert.equal(configUpdate.update.configOptions[0]!.id, undefined)
 
-  assert.equal(updates.find(u => u.update?.sessionUpdate === 'current_mode_update'), undefined)
+  assert.equal(
+    updates.find(u => u.update?.sessionUpdate === 'current_mode_update'),
+    undefined
+  )
 })

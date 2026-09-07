@@ -1,4 +1,3 @@
-
 Fork of georgeharker/pi-acp. Local patch: advertise the `max` thinking level to ACP clients (Zed).
 
 - src/acp/agent.ts: add "max" to ThinkingLevel, isThinkingLevel, available modes
@@ -43,8 +42,6 @@ On top of georgeharker v0.3.1, this branch adds:
 - pi extension `input`/`editor` dialogs bridge to ACP form `elicitation/create` when the client
   advertises `elicitation.form` (Zed 1.12+); accept -> ui value, decline/cancel -> cancelled.
   Older clients keep the cancel-with-note fallback.
-- Boolean config option `auto_compaction` (category model_config), advertised only when the
-  client sends `session.configOptions.boolean`; wired to pi's `set_auto_compaction`.
 - Debug-gated stderr log for unknown pi RPC event types (`debug` key in pi-acp.json).
 
 Verified: `session/unload` does not exist in ACP v1 (SDK 1.4.0 AGENT_METHODS) — not a gap;
@@ -62,7 +59,7 @@ config options, titles) and adapt only the v2 wire differences:
 
 - initialize: protocolVersion 2, v2 info/capabilities shape; v2 `capabilities` mapped back to the
   v1 `clientCapabilities`. Note: the v2 draft's ClientCapabilities only has
-  auth/elicitation/nes/positionEncodings/_meta — `terminal`/`fs` client caps don't exist there.
+  auth/elicitation/nes/positionEncodings/\_meta — `terminal`/`fs` client caps don't exist there.
 - session/prompt: accepted immediately; the turn runs in the background and completes via
   `state_update` running -> idle (stopReason + UNSTABLE usage). The SDK sends the prompt response
   when the handler resolves, so the turn must NOT be awaited in the handler.
