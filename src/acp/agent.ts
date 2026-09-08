@@ -1727,19 +1727,16 @@ function buildStartupInfo(opts: {
     md.push('')
   }
 
-  const addColumnSection = (title: string, items: string[], columnCount = 3) => {
-    const cleaned = items.map(s => s.trim()).filter(Boolean)
+  // Compact "collapsed" section, mirroring pi's TUI startup header: one sorted,
+  // comma-joined line of short labels instead of per-item paths or tables.
+  const addCompactSection = (title: string, items: string[]) => {
+    const cleaned = Array.from(new Set(items.map(s => s.trim()).filter(Boolean))).sort((a, b) =>
+      a.localeCompare(b)
+    )
     if (!cleaned.length) return
 
-    const columns = Math.min(columnCount, cleaned.length)
     md.push(`## ${title}`)
-    md.push(`| ${Array.from({ length: columns }, () => title).join(' | ')} |`)
-    md.push(`| ${Array.from({ length: columns }, () => '---').join(' | ')} |`)
-    for (let i = 0; i < cleaned.length; i += columns) {
-      const row = cleaned.slice(i, i + columns)
-      while (row.length < columns) row.push('')
-      md.push(`| ${row.map(item => item.replaceAll('|', '\\|')).join(' | ')} |`)
-    }
+    md.push(cleaned.join(', '))
     md.push('')
   }
 
@@ -1763,7 +1760,7 @@ function buildStartupInfo(opts: {
         try {
           const st = statSync(p)
           if (st.isFile() && e.toLowerCase().endsWith('.md')) {
-            skillsItems.push(p)
+            skillsItems.push(basename(e, '.md'))
           }
         } catch {
           // ignore
@@ -1794,7 +1791,7 @@ function buildStartupInfo(opts: {
           if (st.isDirectory()) {
             stack.push(p)
           } else if (st.isFile() && name === 'SKILL.md') {
-            skillsItems.push(p)
+            skillsItems.push(basename(dir))
           }
         }
       }
@@ -1816,7 +1813,7 @@ function buildStartupInfo(opts: {
   const projectSkillsDir = join(opts.cwd, '.pi', 'skills')
   pushSkillFromRoot(projectSkillsDir)
 
-  addSection('Skills', skillsItems)
+  addCompactSection('Skills', skillsItems)
 
   // Prompts
   const promptsItems: string[] = []
@@ -1829,12 +1826,26 @@ function buildStartupInfo(opts: {
   }
   addSection('Prompts', promptsItems)
 
-  // Extensions
+  // Extensions — same discovery pi uses: flat *.ts/*.js files plus */index.ts directories.
   const extItems: string[] = []
   const extDir = join(process.env.HOME ?? '', '.pi', 'agent', 'extensions')
   try {
-    const exts = readdirSync(extDir).filter(f => f.endsWith('.ts') || f.endsWith('.js'))
-    for (const f of exts) extItems.push(join(extDir, f))
+    for (const f of readdirSync(extDir)) {
+      const p = join(extDir, f)
+      try {
+        const st = statSync(p)
+        if (st.isFile() && (f.endsWith('.ts') || f.endsWith('.js'))) {
+          extItems.push(f)
+        } else if (
+          st.isDirectory() &&
+          (existsSync(join(p, 'index.ts')) || existsSync(join(p, 'index.js')))
+        ) {
+          extItems.push(f)
+        }
+      } catch {
+        // ignore
+      }
+    }
   } catch {
     // ignore
   }
@@ -1847,14 +1858,15 @@ function buildStartupInfo(opts: {
       const pkgs: string[] = Array.isArray(settings?.packages) ? settings.packages : []
       for (const pkg of pkgs) {
         const s = String(pkg)
-        extItems.push(s)
+        // Compact label: npm specs keep name (and version pin), local/git paths collapse to basename.
+        extItems.push(s.startsWith('npm:') ? s.slice(4) : basename(s))
       }
     } catch {
       // ignore
     }
   }
 
-  addColumnSection('Extensions', extItems)
+  addCompactSection('Extensions', extItems)
 
   if (opts.updateNotice) {
     md.push('---')

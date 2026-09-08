@@ -17,6 +17,7 @@ test('PiAcpAgent: startup info includes project-level packages from .pi/settings
   const { join } = await import('node:path')
 
   const prevAgentDir = process.env.PI_CODING_AGENT_DIR
+  const prevHome = process.env.HOME
 
   // Create a fake global agent dir (empty settings)
   const agentDir = mkdtempSync(join(tmpdir(), 'pi-acp-global-'))
@@ -26,6 +27,8 @@ test('PiAcpAgent: startup info includes project-level packages from .pi/settings
     'utf-8'
   )
   process.env.PI_CODING_AGENT_DIR = agentDir
+  // Hermetic HOME so the real ~/.pi/agent/extensions doesn't leak into the summary
+  process.env.HOME = mkdtempSync(join(tmpdir(), 'pi-acp-home-'))
 
   // Create a fake project dir with .pi/settings.json containing packages
   const projectDir = mkdtempSync(join(tmpdir(), 'pi-acp-project-'))
@@ -71,12 +74,14 @@ test('PiAcpAgent: startup info includes project-level packages from .pi/settings
 
     assert.match(
       startupInfo,
-      /## Extensions\n\| Extensions \| Extensions \| Extensions \|\n\| --- \| --- \| --- \|\n\| npm:global-ext \| npm:second-ext \| \/path\/to\/local-extension \|\n\| \/path\/to\/another-extension \|  \|  \|/
+      /## Extensions\nanother-extension, global-ext, local-extension, second-ext\n/
     )
     assert.doesNotMatch(startupInfo, /index\.ts/)
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir
+    if (prevHome == null) delete process.env.HOME
+    else process.env.HOME = prevHome
   }
 })
