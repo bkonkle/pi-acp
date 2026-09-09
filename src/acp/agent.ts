@@ -75,7 +75,6 @@ type AdvertisedModel = {
 
 const MODEL_CONFIG_ID = 'model'
 const THOUGHT_LEVEL_CONFIG_ID = 'thought_level'
-const AUTO_COMPACTION_CONFIG_ID = 'auto_compaction'
 
 function builtinAvailableCommands(): AvailableCommand[] {
   return [
@@ -407,11 +406,10 @@ export class PiAcpAgent implements ACPAgent {
       )
     }
 
-    const { configOptions, models, modes } = await getSessionConfiguration(
-      session.proc,
-      { state, availableModels },
-      { clientCapabilities: this.clientCapabilities }
-    )
+    const { configOptions, models, modes } = await getSessionConfiguration(session.proc, {
+      state,
+      availableModels
+    })
 
     const quietStartup = getQuietStartup(params.cwd)
     const updateNotice = buildUpdateNotice()
@@ -1155,9 +1153,7 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const { configOptions, models, modes } = await getSessionConfiguration(proc, undefined, {
-      clientCapabilities: this.clientCapabilities
-    })
+    const { configOptions, models, modes } = await getSessionConfiguration(proc)
 
     const response = {
       configOptions,
@@ -1263,9 +1259,7 @@ export class PiAcpAgent implements ACPAgent {
 
     ;(this.sessions as any).closeAllExcept?.(session.sessionId, preexistingSessionIds)
 
-    const { configOptions, modes } = await getSessionConfiguration(proc, undefined, {
-      clientCapabilities: this.clientCapabilities
-    })
+    const { configOptions, modes } = await getSessionConfiguration(proc)
 
     // Advertise slash commands after the response so the client knows the session exists.
     setTimeout(() => {
@@ -1344,7 +1338,7 @@ export class PiAcpAgent implements ACPAgent {
       }
     })
 
-    await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc, this.clientCapabilities)
+    await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
 
     return {}
   }
@@ -1353,44 +1347,31 @@ export class PiAcpAgent implements ACPAgent {
     const session = await this.restoreSession(params.sessionId)
     const configId = String(params.configId)
 
-    if (configId === AUTO_COMPACTION_CONFIG_ID) {
-      if (typeof params.value !== 'boolean') {
-        throw RequestError.invalidParams(`Expected boolean value for config option: ${configId}`)
-      }
-
-      await session.proc.setAutoCompaction(params.value)
-    } else {
-      if (typeof params.value !== 'string') {
-        throw RequestError.invalidParams(`Expected string value for config option: ${configId}`)
-      }
-
-      if (configId === MODEL_CONFIG_ID) {
-        await setSessionModel(session.proc, params.value)
-      } else if (configId === THOUGHT_LEVEL_CONFIG_ID) {
-        if (!isThinkingLevel(params.value)) {
-          throw RequestError.invalidParams(`Unknown thinking level: ${params.value}`)
-        }
-
-        await session.proc.setThinkingLevel(params.value)
-
-        void this.conn.sessionUpdate({
-          sessionId: session.sessionId,
-          update: {
-            sessionUpdate: 'current_mode_update',
-            currentModeId: params.value
-          }
-        })
-      } else {
-        throw RequestError.invalidParams(`Unknown config option: ${configId}`)
-      }
+    if (typeof params.value !== 'string') {
+      throw RequestError.invalidParams(`Expected string value for config option: ${configId}`)
     }
 
-    const configOptions = await emitConfigOptionsUpdate(
-      this.conn,
-      session.sessionId,
-      session.proc,
-      this.clientCapabilities
-    )
+    if (configId === MODEL_CONFIG_ID) {
+      await setSessionModel(session.proc, params.value)
+    } else if (configId === THOUGHT_LEVEL_CONFIG_ID) {
+      if (!isThinkingLevel(params.value)) {
+        throw RequestError.invalidParams(`Unknown thinking level: ${params.value}`)
+      }
+
+      await session.proc.setThinkingLevel(params.value)
+
+      void this.conn.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'current_mode_update',
+          currentModeId: params.value
+        }
+      })
+    } else {
+      throw RequestError.invalidParams(`Unknown config option: ${configId}`)
+    }
+
+    const configOptions = await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
     return { configOptions }
   }
 }
@@ -1455,8 +1436,7 @@ async function getThinkingState(
 
 async function getSessionConfiguration(
   proc: PiRpcProcess,
-  pre?: { state?: any | null; availableModels?: any | null },
-  opts?: { clientCapabilities?: ClientCapabilities }
+  pre?: { state?: any | null; availableModels?: any | null }
 ): Promise<{
   configOptions: SessionConfigOption[]
   models: {
@@ -1479,23 +1459,8 @@ async function getSessionConfiguration(
     getThinkingState(proc, { state })
   ])
 
-  // Boolean config options require explicit client support
-  // (ClientCapabilities.session.configOptions.boolean, e.g. recent Zed).
-  const booleans: SessionConfigOption[] = opts?.clientCapabilities?.session?.configOptions?.boolean
-    ? [
-        {
-          type: 'boolean',
-          id: AUTO_COMPACTION_CONFIG_ID,
-          category: 'model_config',
-          name: 'Auto-compaction',
-          description: 'Automatically compact the conversation when the context window fills',
-          currentValue: state?.autoCompactionEnabled !== false
-        }
-      ]
-    : []
-
   return {
-    configOptions: buildConfigOptions({ models, modes, booleans }),
+    configOptions: buildConfigOptions({ models, modes }),
     models,
     modes
   }
@@ -1522,7 +1487,6 @@ function buildConfigOptions(state: {
     }>
     currentModeId: string
   }
-  booleans?: SessionConfigOption[]
 }): SessionConfigOption[] {
   const configOptions: SessionConfigOption[] = [
     {
@@ -1555,8 +1519,6 @@ function buildConfigOptions(state: {
       }))
     })
   }
-
-  configOptions.push(...(state.booleans ?? []))
 
   return configOptions
 }
@@ -1631,10 +1593,9 @@ async function getModelState(
 async function emitConfigOptionsUpdate(
   conn: AgentSideConnection,
   sessionId: string,
-  proc: PiRpcProcess,
-  clientCapabilities?: ClientCapabilities
+  proc: PiRpcProcess
 ): Promise<SessionConfigOption[]> {
-  const { configOptions } = await getSessionConfiguration(proc, undefined, { clientCapabilities })
+  const { configOptions } = await getSessionConfiguration(proc)
 
   await conn.sessionUpdate({
     sessionId,
@@ -1766,6 +1727,19 @@ function buildStartupInfo(opts: {
     md.push('')
   }
 
+  // Compact "collapsed" section, mirroring pi's TUI startup header: one sorted,
+  // comma-joined line of short labels instead of per-item paths or tables.
+  const addCompactSection = (title: string, items: string[]) => {
+    const cleaned = Array.from(new Set(items.map(s => s.trim()).filter(Boolean))).sort((a, b) =>
+      a.localeCompare(b)
+    )
+    if (!cleaned.length) return
+
+    md.push(`## ${title}`)
+    md.push(cleaned.join(', '))
+    md.push('')
+  }
+
   // Context
   const contextItems: string[] = []
   const contextPath = join(opts.cwd, 'AGENTS.md')
@@ -1786,7 +1760,7 @@ function buildStartupInfo(opts: {
         try {
           const st = statSync(p)
           if (st.isFile() && e.toLowerCase().endsWith('.md')) {
-            skillsItems.push(p)
+            skillsItems.push(basename(e, '.md'))
           }
         } catch {
           // ignore
@@ -1817,7 +1791,7 @@ function buildStartupInfo(opts: {
           if (st.isDirectory()) {
             stack.push(p)
           } else if (st.isFile() && name === 'SKILL.md') {
-            skillsItems.push(p)
+            skillsItems.push(basename(dir))
           }
         }
       }
@@ -1839,7 +1813,7 @@ function buildStartupInfo(opts: {
   const projectSkillsDir = join(opts.cwd, '.pi', 'skills')
   pushSkillFromRoot(projectSkillsDir)
 
-  addSection('Skills', skillsItems)
+  addCompactSection('Skills', skillsItems)
 
   // Prompts
   const promptsItems: string[] = []
@@ -1852,12 +1826,26 @@ function buildStartupInfo(opts: {
   }
   addSection('Prompts', promptsItems)
 
-  // Extensions
+  // Extensions — same discovery pi uses: flat *.ts/*.js files plus */index.ts directories.
   const extItems: string[] = []
   const extDir = join(process.env.HOME ?? '', '.pi', 'agent', 'extensions')
   try {
-    const exts = readdirSync(extDir).filter(f => f.endsWith('.ts') || f.endsWith('.js'))
-    for (const f of exts) extItems.push(join(extDir, f))
+    for (const f of readdirSync(extDir)) {
+      const p = join(extDir, f)
+      try {
+        const st = statSync(p)
+        if (st.isFile() && (f.endsWith('.ts') || f.endsWith('.js'))) {
+          extItems.push(f)
+        } else if (
+          st.isDirectory() &&
+          (existsSync(join(p, 'index.ts')) || existsSync(join(p, 'index.js')))
+        ) {
+          extItems.push(f)
+        }
+      } catch {
+        // ignore
+      }
+    }
   } catch {
     // ignore
   }
@@ -1870,18 +1858,15 @@ function buildStartupInfo(opts: {
       const pkgs: string[] = Array.isArray(settings?.packages) ? settings.packages : []
       for (const pkg of pkgs) {
         const s = String(pkg)
-        if (s.startsWith('npm:')) {
-          extItems.push(`${s}\n  - index.ts`)
-        } else {
-          extItems.push(s)
-        }
+        // Compact label: npm specs keep name (and version pin), local/git paths collapse to basename.
+        extItems.push(s.startsWith('npm:') ? s.slice(4) : basename(s))
       }
     } catch {
       // ignore
     }
   }
 
-  addSection('Extensions', extItems)
+  addCompactSection('Extensions', extItems)
 
   if (opts.updateNotice) {
     md.push('---')

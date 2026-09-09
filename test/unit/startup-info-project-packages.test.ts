@@ -17,17 +17,28 @@ test('PiAcpAgent: startup info includes project-level packages from .pi/settings
   const { join } = await import('node:path')
 
   const prevAgentDir = process.env.PI_CODING_AGENT_DIR
+  const prevHome = process.env.HOME
 
   // Create a fake global agent dir (empty settings)
   const agentDir = mkdtempSync(join(tmpdir(), 'pi-acp-global-'))
-  writeFileSync(join(agentDir, 'settings.json'), JSON.stringify({ packages: ['npm:global-ext'] }), 'utf-8')
+  writeFileSync(
+    join(agentDir, 'settings.json'),
+    JSON.stringify({ packages: ['npm:global-ext', 'npm:second-ext'] }),
+    'utf-8'
+  )
   process.env.PI_CODING_AGENT_DIR = agentDir
+  // Hermetic HOME so the real ~/.pi/agent/extensions doesn't leak into the summary
+  process.env.HOME = mkdtempSync(join(tmpdir(), 'pi-acp-home-'))
 
   // Create a fake project dir with .pi/settings.json containing packages
   const projectDir = mkdtempSync(join(tmpdir(), 'pi-acp-project-'))
   const piDir = join(projectDir, '.pi')
   mkdirSync(piDir)
-  writeFileSync(join(piDir, 'settings.json'), JSON.stringify({ packages: ['/path/to/local-extension'] }), 'utf-8')
+  writeFileSync(
+    join(piDir, 'settings.json'),
+    JSON.stringify({ packages: ['/path/to/local-extension', '/path/to/another-extension'] }),
+    'utf-8'
+  )
 
   const realSetTimeout = globalThis.setTimeout
   ;(globalThis as any).setTimeout = () => {
@@ -61,11 +72,16 @@ test('PiAcpAgent: startup info includes project-level packages from .pi/settings
     const res = await agent.newSession({ cwd: projectDir, mcpServers: [] } as any)
     const startupInfo: string = res?._meta?.piAcp?.startupInfo ?? ''
 
-    assert.ok(startupInfo.includes('npm:global-ext'), 'should include global package')
-    assert.ok(startupInfo.includes('/path/to/local-extension'), 'should include project package')
+    assert.match(
+      startupInfo,
+      /## Extensions\nanother-extension, global-ext, local-extension, second-ext\n/
+    )
+    assert.doesNotMatch(startupInfo, /index\.ts/)
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir
+    if (prevHome == null) delete process.env.HOME
+    else process.env.HOME = prevHome
   }
 })

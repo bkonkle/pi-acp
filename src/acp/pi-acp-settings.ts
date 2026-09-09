@@ -10,7 +10,7 @@ import { getAgentDir } from './pi-settings.js'
  * a fallback (see {@link getLegacyPiAcpSettingsPath}).
  *
  * This is the single source of configuration for the adapter: there are no environment-variable
- * overrides. Optional keys (`piCommand`, `dataDir`) fall back to a built-in default when absent.
+ * overrides. Optional keys fall back to a built-in default when absent.
  */
 type PiAcpSettings = {
   /** Advertise ACP `promptCapabilities.embeddedContext` to the client. Default: on. */
@@ -19,17 +19,24 @@ type PiAcpSettings = {
   rpcTimeoutMs: number
   /** Emit adapter debug logging to stderr. */
   debug: boolean
+  /** Serve the experimental ACP v2 draft agent behind the dual-version router. Default: off. */
+  enableV2: boolean
   /** Override the pi executable. Absent = platform default (`pi`, or `pi.cmd` on Windows). */
   piCommand?: string
   /** Override pi-acp's data directory. Absent = `~/.pi/pi-acp`. */
   dataDir?: string
+  /** Provider selected for new ACP sessions. Both model fields must be set to take effect. */
+  defaultProvider?: string
+  /** Model selected for new ACP sessions. Both model fields must be set to take effect. */
+  defaultModel?: string
 }
 
 /** Defaults, also the exact object written by {@link ensurePiAcpSettingsFile}. */
 const DEFAULT_PI_ACP_SETTINGS: PiAcpSettings = {
   embeddedContext: true,
   rpcTimeoutMs: 120_000,
-  debug: false
+  debug: false,
+  enableV2: false
 }
 
 /** pi-acp's own settings file, in pi's `extensions/` dir so it follows a relocated config dir. */
@@ -69,10 +76,15 @@ function readPiAcpSettings(path: string = resolvePiAcpSettingsReadPath()): PiAcp
         typeof data.rpcTimeoutMs === 'number' && Number.isFinite(data.rpcTimeoutMs) && data.rpcTimeoutMs > 0
           ? data.rpcTimeoutMs
           : DEFAULT_PI_ACP_SETTINGS.rpcTimeoutMs,
-      debug: typeof data.debug === 'boolean' ? data.debug : DEFAULT_PI_ACP_SETTINGS.debug
+      debug: typeof data.debug === 'boolean' ? data.debug : DEFAULT_PI_ACP_SETTINGS.debug,
+      enableV2: typeof data.enableV2 === 'boolean' ? data.enableV2 : DEFAULT_PI_ACP_SETTINGS.enableV2
     }
     if (typeof data.piCommand === 'string' && data.piCommand.trim()) out.piCommand = data.piCommand
     if (typeof data.dataDir === 'string' && data.dataDir.trim()) out.dataDir = data.dataDir
+    if (typeof data.defaultProvider === 'string' && data.defaultProvider.trim()) {
+      out.defaultProvider = data.defaultProvider.trim()
+    }
+    if (typeof data.defaultModel === 'string' && data.defaultModel.trim()) out.defaultModel = data.defaultModel.trim()
     return out
   } catch {
     return { ...DEFAULT_PI_ACP_SETTINGS }
@@ -91,12 +103,24 @@ export function getPiAcpDebug(): boolean {
   return readPiAcpSettings().debug
 }
 
+/** Experimental: serve the ACP v2 draft agent behind the dual-version router. */
+export function getPiAcpEnableV2(): boolean {
+  return readPiAcpSettings().enableV2
+}
+
 export function getPiCommandOverride(): string | undefined {
   return readPiAcpSettings().piCommand
 }
 
 export function getPiAcpDataDir(): string | undefined {
   return readPiAcpSettings().dataDir
+}
+
+export function getDefaultModel(): { provider: string; model: string } | undefined {
+  const settings = readPiAcpSettings()
+  if (!settings.defaultProvider || !settings.defaultModel) return undefined
+
+  return { provider: settings.defaultProvider, model: settings.defaultModel }
 }
 
 /**

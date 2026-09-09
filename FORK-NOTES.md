@@ -1,4 +1,3 @@
-
 Fork of georgeharker/pi-acp. Local patch: advertise the `max` thinking level to ACP clients (Zed).
 
 - src/acp/agent.ts: add "max" to ThinkingLevel, isThinkingLevel, available modes
@@ -43,9 +42,43 @@ On top of georgeharker v0.3.1, this branch adds:
 - pi extension `input`/`editor` dialogs bridge to ACP form `elicitation/create` when the client
   advertises `elicitation.form` (Zed 1.12+); accept -> ui value, decline/cancel -> cancelled.
   Older clients keep the cancel-with-note fallback.
-- Boolean config option `auto_compaction` (category model_config), advertised only when the
-  client sends `session.configOptions.boolean`; wired to pi's `set_auto_compaction`.
-- Debug-gated stderr log for unknown pi RPC event types (`PI_ACP_DEBUG`).
+- Debug-gated stderr log for unknown pi RPC event types (`debug` key in pi-acp.json).
 
 Verified: `session/unload` does not exist in ACP v1 (SDK 1.4.0 AGENT_METHODS) — not a gap;
 `session/close` covers it.
+
+## 2026-09-05: experimental ACP v2 draft agent (behind `enableV2`)
+
+Track B from docs/v2-parity-and-mcp-plan.md, prototype stage against
+`@agentclientprotocol/sdk/experimental/v2` (1.4.0). Off by default; turn on with
+`"enableV2": true` in pi-acp.json. When enabled, `src/index.ts` serves both versions through the
+SDK's `agentProtocolRouter()` — v1 clients are unaffected.
+
+Design (src/acp/v2/agent.ts): delegate to the v1 PiAcpAgent (sessions, pi-RPC translation,
+config options, titles) and adapt only the v2 wire differences:
+
+- initialize: protocolVersion 2, v2 info/capabilities shape; v2 `capabilities` mapped back to the
+  v1 `clientCapabilities`. Note: the v2 draft's ClientCapabilities only has
+  auth/elicitation/nes/positionEncodings/\_meta — `terminal`/`fs` client caps don't exist there.
+- session/prompt: accepted immediately; the turn runs in the background and completes via
+  `state_update` running -> idle (stopReason + UNSTABLE usage). The SDK sends the prompt response
+  when the handler resolves, so the turn must NOT be awaited in the handler.
+- session/resume: `replayFrom:{type:"start"}` routes to the v1 history-replay load path; plain
+  resume routes to v1 resume.
+- session/set_config_option: typed values (`id`/`boolean`) pass through; response/replies
+  translated.
+- Update translation in the conn shim: chunk updates get a messageId if missing (v2 requires
+  it), `plan` -> `plan_update` (items shape, entries preserved), `current_mode_update` dropped
+  (v2 removed modes), config options `id` -> `configId` everywhere.
+
+Not yet on the v2 path (deferred): unified message IDs per the full B6 semantics, structured
+diffs (B6), elicitation create/complete round-trip re-verification under v2 zod (params are
+passed through; v2 request shapes differ slightly, e.g. required `title` on request_permission).
+
+Live harness: `node scripts/v2-smoke.mjs` (from the repo root, after `npm run build`) drives a
+full v2 turn over stdio — initialize(2) -> session/new -> prompt -> state_update running -> idle —
+and exits 0 on success.
+
+Known wire caveat: v2 config options advertise `currentValue` from pi state at session start;
+`providers/*`, `auth/login`, `nes/*`, document sync, and forking are unimplemented (v1 agent
+ignores them too).

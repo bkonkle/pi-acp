@@ -1,6 +1,6 @@
 # Plan: ACP v2 (draft) adoption + pi-mcp-adapter auto-configuration
 
-Status: proposal (plan only — no code yet).
+Status: Track A items A1 (MCP config auto-write) and A2 (SDK 1.4.0 bump) shipped; A3 (resume/close/logout on v1) shipped. Track B prototyped behind the `enableV2` settings flag (dual-version router + delegating v2 agent; see FORK-NOTES "experimental ACP v2 draft agent"). Held out of default builds until v2 leaves experimental.
 Scope decisions: **MCP config-file auto-write now (v1)**; **v2 built behind the dual-version router but
 held until v2 graduates from experimental to a published non-experimental SDK release**;
 `session/request_permission` gating deferred (pi-blocked). MCP setup = **write config only** (assume
