@@ -62,7 +62,7 @@ import { writeMcpConfig, buildMcpNotice, cleanupStaleGeneratedConfig } from './m
 import { isAbsolute } from 'node:path'
 import { existsSync, readFileSync, realpathSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
-import { join, dirname, basename } from 'node:path'
+import { join, dirname, basename, relative, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { normalizeAdditionalDirectories } from './workspace-roots.js'
 
@@ -1740,11 +1740,19 @@ function buildStartupInfo(opts: {
     md.push('')
   }
 
-  // Context
+  // Context — collapsed, like pi's TUI header: one comma-joined line of compact paths
+  // (cwd-relative when possible, ~-abbreviated for home paths)
+  const compactPath = (p: string): string => {
+    if (p === opts.cwd) return '.'
+    if (p.startsWith(opts.cwd + sep)) return relative(opts.cwd, p)
+    const home = process.env.HOME ?? ''
+    if (home && p.startsWith(home + sep)) return `~${p.slice(home.length)}`
+    return p
+  }
   const contextItems: string[] = []
   const contextPath = join(opts.cwd, 'AGENTS.md')
   if (existsSync(contextPath)) contextItems.push(contextPath)
-  addSection('Context', contextItems)
+  addCompactSection('Context', contextItems.map(compactPath))
 
   // Additional workspace roots (ACP additionalDirectories)
   addSection('Additional workspace roots', opts.additionalDirectories ?? [])
