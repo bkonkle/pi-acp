@@ -39,6 +39,8 @@ test('PiAcpAgent: startup info includes project-level packages from .pi/settings
     JSON.stringify({ packages: ['/path/to/local-extension', '/path/to/another-extension'] }),
     'utf-8'
   )
+  // Context source file, so the collapsed Context section renders
+  writeFileSync(join(projectDir, 'AGENTS.md'), 'test\n', 'utf-8')
 
   const realSetTimeout = globalThis.setTimeout
   ;(globalThis as any).setTimeout = () => {
@@ -72,6 +74,7 @@ test('PiAcpAgent: startup info includes project-level packages from .pi/settings
     const res = await agent.newSession({ cwd: projectDir, mcpServers: [] } as any)
     const startupInfo: string = res?._meta?.piAcp?.startupInfo ?? ''
 
+    assert.match(startupInfo, /## Context\nAGENTS\.md\n/)
     assert.match(
       startupInfo,
       /## Extensions\nanother-extension, global-ext, local-extension, second-ext\n/
