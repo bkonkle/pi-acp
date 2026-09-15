@@ -542,18 +542,11 @@ export class PiAcpSession {
       const stats = (await this.proc.getSessionStats()) as any
       const ctx = stats?.contextUsage
 
-      if (
-        ctx &&
-        typeof ctx.tokens === 'number' &&
-        typeof ctx.contextWindow === 'number' &&
-        ctx.contextWindow > 0
-      ) {
+      if (ctx && typeof ctx.tokens === 'number' && typeof ctx.contextWindow === 'number' && ctx.contextWindow > 0) {
         this.lastUsageUpdate = {
           used: ctx.tokens,
           size: ctx.contextWindow,
-          ...(typeof stats?.cost === 'number'
-            ? { cost: { amount: stats.cost, currency: 'USD' } }
-            : {})
+          ...(typeof stats?.cost === 'number' ? { cost: { amount: stats.cost, currency: 'USD' } } : {})
         }
         this.emit({ sessionUpdate: 'usage_update', ...this.lastUsageUpdate })
       }
@@ -1044,6 +1037,19 @@ export class PiAcpSession {
       }
 
       case 'message_end': {
+        // pi encodes provider/auth failures as a completed AgentMessage with
+        // stopReason "error" (docs/rpc.md) rather than a separate RPC error event.
+        // Surface it as visible text; otherwise the turn silently ends with no content.
+        const message = (ev as any).message as Record<string, unknown> | undefined
+        const stopReason = message ? stringProp(message, 'stopReason') : null
+        const errorMessage = message ? stringProp(message, 'errorMessage') : null
+        if (stopReason === 'error' && errorMessage) {
+          this.emit({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `\n\n[pi error] ${errorMessage}` } satisfies ContentBlock,
+            messageId: this.nextMessageId()
+          })
+        }
         break
       }
 
@@ -1054,27 +1060,27 @@ export class PiAcpSession {
           .then(() => this.collectUsageUpdate())
           .then(() => this.flushEmits())
           .finally(() => {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-          this.pendingTurn?.resolve(reason)
-          this.pendingTurn = null
+            const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
+            this.pendingTurn?.resolve(reason)
+            this.pendingTurn = null
 
-          // Start next queued prompt, if any.
-          const next = this.turnQueue.shift()
-          if (next) {
-            this.currentMessageId = null
-            this.emit({
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` },
-              messageId: this.nextMessageId()
-            })
-            this.startTurn(next)
-          } else {
-            this.emit({
-              sessionUpdate: 'session_info_update',
-              _meta: { piAcp: { queueDepth: 0, running: false } }
-            })
-          }
-        })
+            // Start next queued prompt, if any.
+            const next = this.turnQueue.shift()
+            if (next) {
+              this.currentMessageId = null
+              this.emit({
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` },
+                messageId: this.nextMessageId()
+              })
+              this.startTurn(next)
+            } else {
+              this.emit({
+                sessionUpdate: 'session_info_update',
+                _meta: { piAcp: { queueDepth: 0, running: false } }
+              })
+            }
+          })
         break
       }
 
