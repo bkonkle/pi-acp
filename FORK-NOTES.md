@@ -1,6 +1,33 @@
-Fork of georgeharker/pi-acp. Local patch: advertise the `max` thinking level to ACP clients (Zed).
+Fork of georgeharker/pi-acp. Local patches:
 
-- src/acp/agent.ts: add "max" to ThinkingLevel, isThinkingLevel, available modes
+## 2026-09-16: derived tool-call titles for MCP gateway/proxy calls
+
+Problem: Zed renders the ACP `tool_call` title verbatim. Pi surfaces MCP tools
+through the pi-mcp-adapter gateway/proxy tools (`mcp`, `mcpScript`,
+`mcp__<server>`), so Zed showed uninformative rows ("mcp", "mcpScript") where
+OpenCode (which registers MCP tools individually) shows
+`slack_slack_search_public` etc.
+
+Fix: `src/acp/tool-title.ts` derives a title from the call args — `mcp` with
+`args.tool` → the tool name; namespace proxies `mcp__<server>` →
+`<server>_<tool>`; gateway meta-actions (search/describe/connect/...) and
+`mcpScript` (first meaningful statement, skipping the `export const meta`
+block) get short readable hints. Used at the `tool_call` / `tool_call_update`
+emission sites in `src/acp/session.ts`; `tool_call_update` includes the title
+only when it changed (streaming args often reveal `args.tool` after the call
+first surfaces). Test: `test/unit/tool-title.test.ts`.
+
+Root alternative without any adapter change: enable `directTools` per server
+in the MCP config (`~/.config/mcp/mcp.json`), which registers each MCP tool
+individually with its prefixed name — same labels OpenCode shows, at the cost
+of the context tokens the proxy design exists to save. Direct tools do not
+cover `mcpScript`, so the derived title still helps there.
+
+## Advertise `max` thinking level
+
+Local patch: advertise the `max` thinking level to ACP clients (Zed).
+
+- src/acp/session.ts: add "max" to ThinkingLevel, isThinkingLevel, available modes
 - src/pi-rpc/process.ts: accept "max" in set_thinking_level
 - test: expect the extra option
 

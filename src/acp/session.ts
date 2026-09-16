@@ -48,6 +48,7 @@ import {
   toPlanEntries as toCribPlanEntries
 } from './plan-bridge.js'
 import { parseSessionTitleEntry } from './session-title.js'
+import { toolCallTitle } from './tool-title.js'
 
 /** Custom entry type used by the user's auto-title pi extension (see session-title.ts). */
 const TITLE_CUSTOM_TYPE = 'acp:session_title'
@@ -351,6 +352,8 @@ export class PiAcpSession {
   private fileSnapshots = new Map<string, { path: string; oldText: string | null }>()
   private fileMutationToolCallIds = new Set<string>()
   private bashToolCallIds = new Set<string>()
+  /** Last title we sent per tool call, so streaming args can upgrade it in place. */
+  private lastToolCallTitles = new Map<string, string>()
   private bashOutputSnapshots = new Map<string, string>()
 
   // ACP messageId grouping: chunks belonging to the same assistant message share a messageId.
@@ -646,12 +649,25 @@ export class PiAcpSession {
     })
   }
 
+  /**
+   * Title delta for a tool_call_update: derived titles can improve once full
+   * args are known (e.g. mcp args stream in after the call started). Returns
+   * {} when the title has not changed, so we never send redundant updates.
+   */
+  private titleUpdate(toolCallId: string, toolName: string, args: any): { title?: string } {
+    const title = toolCallTitle(toolName, args)
+    if (this.lastToolCallTitles.get(toolCallId) === title) return {}
+    this.lastToolCallTitles.set(toolCallId, title)
+    return { title }
+  }
+
   private cleanupToolCall(toolCallId: string): void {
     this.currentToolCalls.delete(toolCallId)
     this.fileSnapshots.delete(toolCallId)
     this.fileMutationToolCallIds.delete(toolCallId)
     this.bashToolCallIds.delete(toolCallId)
     this.bashOutputSnapshots.delete(toolCallId)
+    this.lastToolCallTitles.delete(toolCallId)
   }
 
   private startTurn(t: QueuedTurn): void {
@@ -771,21 +787,25 @@ export class PiAcpSession {
               })
             } else if (!existingStatus) {
               this.currentToolCalls.set(toolCallId, 'pending')
+              const title = toolCallTitle(toolName, rawInput)
+              this.lastToolCallTitles.set(toolCallId, title)
               this.emit({
                 sessionUpdate: 'tool_call',
                 toolCallId,
-                title: toolName,
+                title,
                 kind: toToolKind(toolName),
                 status,
                 locations,
                 rawInput
               })
             } else {
-              // Best-effort: keep rawInput updated while args are streaming.
+              // Best-effort: keep rawInput (and a derived title, once args
+              // become known) updated while args are streaming.
               // Keep the existing status (pending or in_progress).
               this.emit({
                 sessionUpdate: 'tool_call_update',
                 toolCallId,
+                ...this.titleUpdate(toolCallId, toolName, rawInput),
                 status,
                 locations,
                 rawInput
@@ -852,10 +872,12 @@ export class PiAcpSession {
         // If we already surfaced the tool call while the model streamed it, just transition.
         if (!this.currentToolCalls.has(toolCallId)) {
           this.currentToolCalls.set(toolCallId, 'in_progress')
+          const title = toolCallTitle(toolName, args)
+          this.lastToolCallTitles.set(toolCallId, title)
           this.emit({
             sessionUpdate: 'tool_call',
             toolCallId,
-            title: toolName,
+            title,
             kind: toToolKind(toolName),
             status: 'in_progress',
             locations,
@@ -866,6 +888,7 @@ export class PiAcpSession {
           this.emit({
             sessionUpdate: 'tool_call_update',
             toolCallId,
+            ...this.titleUpdate(toolCallId, toolName, args),
             status: 'in_progress',
             locations,
             rawInput: args
