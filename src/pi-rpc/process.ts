@@ -8,11 +8,13 @@ import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 
 /**
  * Bundled pi extensions shipped in this package and loaded into every spawned
- * `pi` process via `-e` (see src/extensions/ for the newer ones). Each extension
- * is gated to RPC/`PI_ACP=1` mode and guards against double loading, so it is
- * harmless when ALSO installed as a pi package via the `pi.extensions` key.
+ * `pi` process via `-e`. Each extension is gated to RPC/`PI_ACP=1` mode and
+ * guards against double loading, so it is harmless when ALSO installed as a
+ * pi package via the `pi.extensions` key. (auto-title used to be bundled here;
+ * it now lives in the user's pi-setup as a general extension — the adapter
+ * syncs whatever pi names the session via `session_info_changed`.)
  */
-const BUNDLED_EXTENSIONS = ['pi-extension', 'todo-acp', 'auto-title'] as const
+const BUNDLED_EXTENSIONS = ['pi-extension', 'todo-acp'] as const
 
 /**
  * Resolve `-e` arguments for the bundled pi extensions. Built output lives in

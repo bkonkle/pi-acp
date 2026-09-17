@@ -1,5 +1,37 @@
 Fork of georgeharker/pi-acp. Local patches:
 
+## 2026-09-16: generic thread-title sync; auto-title extension moved to pi-setup
+
+The bundled `auto-title` extension is gone. Titling was the only ACP-specific producer left, and
+pi already streams everything needed to sync names generically:
+
+- pi emits `session_info_changed` (AgentSession event) over RPC for ANY session-name change —
+  extension `setSessionName()`, the `/name` command, RPC `set_session_name` (forwarded by
+  `session.subscribe`; only `message_update` is rewritten by `toJsonEvent`). Verified in the
+  installed pi's `dist/core/agent-session.js` + `dist/modes/rpc/rpc-mode.js`.
+- pi persists the name itself (`sessionManager.appendSessionInfo`), so `get_state().sessionName`
+  restores it on any resume — no custom entry needed for durability.
+
+Adapter changes:
+
+- `src/acp/session.ts`: new `session_info_changed` case → ACP `session_info_update` (title +
+  `updatedAt`); new `emitTitleUpdate()` / `syncTitleFromState()` helpers. Removed the
+  `acp:session_title` custom-entry decode branch and `src/acp/session-title.ts`.
+- `src/acp/agent.ts`: `createSession` reuses its pre-fetched state to seed the title;
+  `restoreSession` (the funnel for `session/load`, `session/resume`, lazy restores) seeds it
+  fire-and-forget. Both calls are optional-chained since tests stub session objects.
+- Removed `auto-title` from `BUNDLED_EXTENSIONS`, `package.json` `pi.extensions`, and the tsup
+  entry list.
+- Tests: `test/component/session-title.test.ts` covers the event sync (name change → title
+  update, refresh per change, empty/undefined ignored, foreign custom entries ignored);
+  `test/unit/session-title.test.ts` (entry parser) deleted; `bundled-extensions.test.ts` updated.
+
+The extension now lives in [bkonkle/pi-setup](https://github.com/bkonkle/pi-setup) at
+`home/.pi/agent/extensions/auto-title.ts` as a plain pi extension: `pi.setSessionName()` only,
+plus a private `auto-title:name` marker entry for its manual-rename lock across resume. The old
+extension documented a manual lock but never enforced it (generateTitle had no check); the new
+one actually gates generation on it.
+
 ## 2026-09-16: derived tool-call titles for MCP gateway/proxy calls
 
 Problem: Zed renders the ACP `tool_call` title verbatim. Pi surfaces MCP tools

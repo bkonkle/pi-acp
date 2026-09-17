@@ -253,6 +253,10 @@ export class PiAcpAgent implements ACPAgent {
       this.lastSessionCwd = cwd
       this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
 
+      // Seed the thread title from pi's persisted session name (best effort).
+      // Optional call: tests sometimes stub session objects.
+      void session.syncTitleFromState?.()
+
       return session
     })()
 
@@ -374,6 +378,11 @@ export class PiAcpAgent implements ACPAgent {
           availableModels = null
         })
     ])
+
+    // Seed the client-side thread title from pi's persisted session name (resumed
+    // sessions may already have one; future renames arrive via session_info_changed).
+    // Optional call: tests sometimes stub session objects.
+    void session.syncTitleFromState?.(state)
 
     const availableModelsAuthErr = maybeAuthRequiredError(availableModelsErr)
 

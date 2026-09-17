@@ -10,14 +10,10 @@ import { bundledExtensionArgs } from '../../src/pi-rpc/process.js'
 const here = dirname(fileURLToPath(import.meta.url))
 const srcRoot = join(here, '..', '..', 'src')
 
-test('bundledExtensionArgs: resolves all three bundled extensions from the source tree', () => {
+test('bundledExtensionArgs: resolves all bundled extensions from the source tree', () => {
   const args = bundledExtensionArgs(join(srcRoot, 'pi-rpc', 'process.ts'))
   // tsx dev layout: import.meta.url points at src/pi-rpc/process.ts
-  const expected = [
-    join(srcRoot, 'pi-extension.ts'),
-    join(srcRoot, 'extensions', 'todo-acp.ts'),
-    join(srcRoot, 'extensions', 'auto-title.ts')
-  ]
+  const expected = [join(srcRoot, 'pi-extension.ts'), join(srcRoot, 'extensions', 'todo-acp.ts')]
   assert.deepEqual(
     args,
     expected.flatMap(p => ['-e', p])
@@ -30,11 +26,7 @@ test('bundledExtensionArgs: resolves built .js files from a dist-style layout', 
   const distRoot = join(srcRoot, '..', 'dist')
   if (!existsSync(join(distRoot, 'extensions'))) return // not built yet
   const args = bundledExtensionArgs(join(distRoot, 'index.js'))
-  const expected = [
-    join(distRoot, 'pi-extension.js'),
-    join(distRoot, 'extensions', 'todo-acp.js'),
-    join(distRoot, 'extensions', 'auto-title.js')
-  ]
+  const expected = [join(distRoot, 'pi-extension.js'), join(distRoot, 'extensions', 'todo-acp.js')]
   assert.deepEqual(
     args,
     expected.flatMap(p => ['-e', p])

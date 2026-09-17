@@ -47,11 +47,7 @@ import {
   parsePlanEntry,
   toPlanEntries as toCribPlanEntries
 } from './plan-bridge.js'
-import { parseSessionTitleEntry } from './session-title.js'
 import { toolCallTitle } from './tool-title.js'
-
-/** Custom entry type used by the user's auto-title pi extension (see session-title.ts). */
-const TITLE_CUSTOM_TYPE = 'acp:session_title'
 
 type SessionCreateParams = {
   cwd: string
@@ -496,6 +492,38 @@ export class PiAcpSession {
 
   wasCancelRequested(): boolean {
     return this.cancelRequested
+  }
+
+  /**
+   * Emit a thread-title update to the ACP client (Zed applies it to the thread
+   * name). Called for pi `session_info_changed` events and when seeding from a
+   * resumed session's persisted name.
+   */
+  emitTitleUpdate(title: string): void {
+    this.emit({
+      sessionUpdate: 'session_info_update',
+      title,
+      updatedAt: new Date().toISOString()
+    })
+  }
+
+  /**
+   * Seed the client-side title from pi's persisted session name
+   * (`get_state` → `sessionName`), so titles survive adapter restarts, session
+   * loads, and resumes without relying on history replay. Pass a pre-fetched
+   * state to avoid an extra RPC round trip.
+   */
+  async syncTitleFromState(preloaded?: unknown): Promise<void> {
+    try {
+      const state = preloaded ?? ((await this.proc.getState()) as unknown)
+      const name =
+        typeof (state as { sessionName?: unknown } | null)?.sessionName === 'string'
+          ? ((state as { sessionName: string }).sessionName).trim()
+          : ''
+      if (name) this.emitTitleUpdate(name)
+    } catch {
+      // best effort — title sync is cosmetic
+    }
   }
 
   private emit(update: SessionUpdate): void {
@@ -1036,6 +1064,15 @@ export class PiAcpSession {
         break
       }
 
+      case 'session_info_changed': {
+        // pi emits this for ANY session-name change: an extension's
+        // setSessionName (e.g. auto-title), the /name command, or RPC
+        // set_session_name. Forward it as a thread-title update.
+        const name = typeof (ev as any).name === 'string' ? ((ev as any).name as string).trim() : ''
+        if (name) this.emitTitleUpdate(name)
+        break
+      }
+
       case 'agent_start': {
         // No adapter state to update; ACP turn completion is driven by `agent_settled`.
         break
@@ -1184,19 +1221,10 @@ export class PiAcpSession {
       const op = parsePlanEntry(e.data)
       if (!op) return
       changed = applyPlanEntry(this.planState, op)
-    } else if (e.customType === TITLE_CUSTOM_TYPE) {
-      // auto-title extension: surface the generated name as an ACP session_info_update
-      // (Zed applies it to the thread title). No plan state involved.
-      const title = parseSessionTitleEntry(e.data)
-      if (title) {
-        this.emit({
-          sessionUpdate: 'session_info_update',
-          title,
-          updatedAt: new Date().toISOString()
-        })
-      }
-      return
     }
+    // Note: custom entries from user extensions (e.g. auto-title's `auto-title:name`
+    // markers) intentionally fall through — pi forwards them over RPC as
+    // `entry_appended`, but titles reach the client via `session_info_changed` instead.
 
     if (changed) {
       if (getPiAcpDebug()) {
