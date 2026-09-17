@@ -335,6 +335,84 @@ test('PiAcpSession: cancels unsupported input and editor extension UI requests w
   assert.match((conn.updates[1]!.update as any).content.text, /editor UI request is not supported/)
 })
 
+test('PiAcpSession: formats provider errors compactly and omits volatile gateway details', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({
+    type: 'message_end',
+    message: {
+      stopReason: 'error',
+      errorMessage:
+        '429 {"error":{"message":"The request limited providers for this model and they are currently at capacity.","type":"rate_limit_exceeded"},"statusCode":429,"providerMetadata":{"gateway":{"routing":{"resolvedProvider":"baseten","fallbacksAvailable":["fireworks","baseten"]}},"requestId":"volatile-request-id"}}'
+    }
+  } as any)
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.equal(
+    (conn.updates[0]!.update as any).content.text,
+    '\n\n⚠️ **Provider error (429) from baseten**\nThe request limited providers for this model and they are currently at capacity.\nProviders tried: fireworks, baseten.'
+  )
+  assert.equal((conn.updates[0]!.update as any).content.text.includes('volatile-request-id'), false)
+})
+
+test('PiAcpSession: suppresses duplicate provider errors during retries', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  const error = '429 {"error":{"message":"Provider at capacity"},"statusCode":429,"requestId":"different"}'
+  proc.emit({ type: 'message_end', message: { stopReason: 'error', errorMessage: error } } as any)
+  proc.emit({
+    type: 'message_end',
+    message: { stopReason: 'error', errorMessage: error.replace('different', 'another') }
+  } as any)
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.updates.length, 1)
+  assert.match((conn.updates[0]!.update as any).content.text, /Provider at capacity/)
+})
+
+test('PiAcpSession: preserves readable plain-text provider errors', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  proc.emit({ type: 'message_end', message: { stopReason: 'error', errorMessage: 'Provider unavailable' } } as any)
+
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal((conn.updates[0]!.update as any).content.text, '\n\n⚠️ **Provider error**\nProvider unavailable')
+})
+
 test('PiAcpSession: emits agent_message_chunk for auto_retry_start with attempt/maxAttempts and rounded delay', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
@@ -1043,7 +1121,10 @@ test('PiAcpSession: omits usage_update when pi reports no contextUsage', async (
   await new Promise(r => setTimeout(r, 0))
   await new Promise(r => setTimeout(r, 0))
 
-  assert.equal(conn.updates.find(u => (u.update as any).sessionUpdate === 'usage_update'), undefined)
+  assert.equal(
+    conn.updates.find(u => (u.update as any).sessionUpdate === 'usage_update'),
+    undefined
+  )
 })
 
 test('PiAcpSession: takeTurnUsage returns and clears the last turn usage snapshot', async () => {

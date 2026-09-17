@@ -356,6 +356,7 @@ export class PiAcpSession {
   // pi's `message_start` event begins a new message; the id is assigned lazily on first chunk.
   private currentMessageId: string | null = null
   private messageCounter = 0
+  private surfacedErrorKeys = new Set<string>()
 
   // Provider-reported cumulative usage from the latest pi `message_update`, and the
   // ACP usage_update snapshot collected at the end of the last turn (also surfaced
@@ -518,7 +519,7 @@ export class PiAcpSession {
       const state = preloaded ?? ((await this.proc.getState()) as unknown)
       const name =
         typeof (state as { sessionName?: unknown } | null)?.sessionName === 'string'
-          ? ((state as { sessionName: string }).sessionName).trim()
+          ? (state as { sessionName: string }).sessionName.trim()
           : ''
       if (name) this.emitTitleUpdate(name)
     } catch {
@@ -701,6 +702,7 @@ export class PiAcpSession {
   private startTurn(t: QueuedTurn): void {
     this.cancelRequested = false
     this.currentMessageId = null
+    this.surfacedErrorKeys.clear()
 
     this.pendingTurn = { resolve: t.resolve, reject: t.reject }
 
@@ -1104,11 +1106,15 @@ export class PiAcpSession {
         const stopReason = message ? stringProp(message, 'stopReason') : null
         const errorMessage = message ? stringProp(message, 'errorMessage') : null
         if (stopReason === 'error' && errorMessage) {
-          this.emit({
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: `\n\n[pi error] ${errorMessage}` } satisfies ContentBlock,
-            messageId: this.nextMessageId()
-          })
+          const formatted = formatPiError(errorMessage)
+          if (!this.surfacedErrorKeys.has(formatted.key)) {
+            this.surfacedErrorKeys.add(formatted.key)
+            this.emit({
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: `\n\n${formatted.text}` } satisfies ContentBlock,
+              messageId: this.nextMessageId()
+            })
+          }
         }
         break
       }
@@ -1390,6 +1396,93 @@ function optionIndex(optionId: string): number | null {
 
   const index = Number(rawIndex)
   return Number.isSafeInteger(index) && index >= 0 && String(index) === rawIndex ? index : null
+}
+
+type FormattedPiError = { key: string; text: string }
+
+type ParsedPiError = {
+  statusCode?: number
+  message?: string
+  providers?: string[]
+  provider?: string
+}
+
+function formatPiError(raw: string): FormattedPiError {
+  const trimmed = raw.trim()
+  const parsed = parsePiError(trimmed)
+  const detail = parsed.message ?? trimmed
+  const status = parsed.statusCode ? ` (${parsed.statusCode})` : ''
+  const provider = parsed.provider ? ` from ${parsed.provider}` : ''
+  const providers = parsed.providers?.length ? `\nProviders tried: ${parsed.providers.join(', ')}.` : ''
+  const text = `⚠️ **Provider error${status}${provider}**\n${detail}${providers}`
+
+  // Retry attempts can carry changing timestamps and request IDs. Deduplicate using the stable
+  // user-facing fields rather than the raw payload.
+  const key = JSON.stringify({
+    statusCode: parsed.statusCode,
+    message: detail,
+    providers: parsed.providers,
+    provider: parsed.provider
+  })
+  return { key, text }
+}
+
+function parsePiError(raw: string): ParsedPiError {
+  const statusMatch = raw.match(/\b(4\d{2}|5\d{2})\b/)
+  const statusCode = statusMatch ? Number(statusMatch[1]) : undefined
+  const candidates: unknown[] = []
+
+  try {
+    candidates.push(JSON.parse(raw))
+  } catch {
+    const jsonStart = raw.indexOf('{')
+    if (jsonStart >= 0) {
+      try {
+        candidates.push(JSON.parse(raw.slice(jsonStart)))
+      } catch {
+        // Keep the original text when the provider payload is not valid JSON.
+      }
+    }
+  }
+
+  const root = candidates[0]
+  const outer = isRecord(root) ? root : null
+  const error = outer && isRecord(outer.error) ? outer.error : null
+  const param = outer && isRecord(outer.param) ? outer.param : null
+  const nestedError = param && isRecord(param.error) ? param.error : null
+  const message = firstString(error?.message, nestedError?.message, outer?.message)
+  const metadata = [outer?.providerMetadata, param?.providerMetadata, nestedError?.providerMetadata].find(isRecord)
+  const gateway = metadata && isRecord(metadata.gateway) ? metadata.gateway : null
+  const routing = gateway && isRecord(gateway.routing) ? gateway.routing : null
+  const provider = firstString(routing?.resolvedProvider, outer?.provider, param?.provider)
+  const providers = uniqueStrings(
+    routing && Array.isArray(routing.fallbacksAvailable)
+      ? routing.fallbacksAvailable
+      : metadata && Array.isArray(metadata.fallbacksAvailable)
+        ? metadata.fallbacksAvailable
+        : undefined
+  )
+
+  return { statusCode, message: message ?? extractReadableMessage(raw), providers, provider }
+}
+
+function extractReadableMessage(raw: string): string {
+  const withoutPrefix = raw.replace(/^\s*\d{3}\s*/, '').trim()
+  return withoutPrefix.length > 500 ? `${withoutPrefix.slice(0, 497)}…` : withoutPrefix
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  return values.find((value): value is string => typeof value === 'string' && value.trim().length > 0)?.trim()
+}
+
+function uniqueStrings(value: unknown[] | undefined): string[] | undefined {
+  if (!value) return undefined
+  const strings = [...new Set(value.filter((item): item is string => typeof item === 'string' && item.length > 0))]
+  return strings.length ? strings : undefined
 }
 
 function formatAutoRetryMessage(ev: PiRpcEvent): string {
