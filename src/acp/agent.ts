@@ -324,11 +324,6 @@ export class PiAcpAgent implements ACPAgent {
 
     this.lastSessionCwd = params.cwd
 
-    // Snapshot existing sessions BEFORE we create this one, so the "one live subprocess per
-    // connection" cleanup below closes only sessions that predate this call — never a sibling
-    // newSession that is still initializing concurrently (which would kill its subprocess).
-    const preexistingSessionIds: string[] = (this.sessions as any).sessionIds?.() ?? []
-
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
@@ -440,15 +435,12 @@ export class PiAcpAgent implements ACPAgent {
     // it's actionable and only appears when the client actually supplied MCP servers.
     const preludeText = mcpNotice ? `${basePrelude}${basePrelude ? '\n' : ''}${mcpNotice}\n` : basePrelude
 
-    if (preludeText)
-      session.setStartupInfo(preludeText)
+    if (preludeText) session.setStartupInfo(preludeText)
 
-      // Policy: within a single ACP connection (one client window), keep only one live pi subprocess.
-      // This avoids leaking subprocesses when clients start new sessions but don't explicitly close old ones.
-      // It does NOT affect other client windows because they run in separate agent processes.
-      //
-      // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId, preexistingSessionIds)
+    // NOTE: deliberately no "close all other sessions" cleanup here. Clients like Zed multiplex
+    // every thread of a worktree through ONE agent connection, so killing sibling sessions would
+    // halt unrelated running threads. Sessions are reclaimed via session/close, session/load
+    // (same-id recycle), and connection teardown (disposeAll).
 
     const response = {
       sessionId: session.sessionId,
@@ -1021,7 +1013,6 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`Unknown sessionId: ${params.sessionId}`)
     }
 
-    const preexistingSessionIds: string[] = (this.sessions as any).sessionIds?.() ?? []
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
     const additionalDirectories = normalizeAdditionalDirectories(params.additionalDirectories, params.cwd)
     const session = await this.restoreSession(params.sessionId, {
@@ -1031,10 +1022,6 @@ export class PiAcpAgent implements ACPAgent {
     })
     const proc = session.proc
     const fileCommands = loadSlashCommands(params.cwd)
-
-    // Policy: within a single ACP connection (one Zed window), keep only one live pi subprocess.
-    // (Tests sometimes stub out `this.sessions`, so guard the call.)
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId, preexistingSessionIds)
 
     // (Optional) ensure mapping stays fresh.
     this.store.upsert({
@@ -1257,7 +1244,6 @@ export class PiAcpAgent implements ACPAgent {
     this.sessions.close(params.sessionId)
     this.lastSessionCwd = params.cwd
 
-    const preexistingSessionIds: string[] = (this.sessions as any).sessionIds?.() ?? []
     const session = await this.restoreSession(params.sessionId, {
       cwd: params.cwd,
       mcpServers: params.mcpServers,
@@ -1265,8 +1251,6 @@ export class PiAcpAgent implements ACPAgent {
     })
     const proc = session.proc
     const fileCommands = loadSlashCommands(params.cwd)
-
-    ;(this.sessions as any).closeAllExcept?.(session.sessionId, preexistingSessionIds)
 
     const { configOptions, modes } = await getSessionConfiguration(proc)
 

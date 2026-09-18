@@ -8,7 +8,6 @@ class FakeSessions {
   async create(_params: any) {
     return this.session
   }
-  closeAllExcept() {}
 }
 
 test('PiAcpAgent: startup info includes project-level packages from .pi/settings.json', async () => {

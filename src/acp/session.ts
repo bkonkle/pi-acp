@@ -212,24 +212,6 @@ export class SessionManager {
     this.sessions.delete(sessionId)
   }
 
-  /** Snapshot of currently-registered session ids (used to make close-others concurrency-safe). */
-  sessionIds(): string[] {
-    return [...this.sessions.keys()]
-  }
-
-  /**
-   * Close all sessions except `keepSessionId`. Pass `among` (a snapshot of ids taken before this
-   * operation began) to close only those, so a session created concurrently — e.g. a second
-   * `newSession` still initializing — is never disposed out from under its own request.
-   */
-  closeAllExcept(keepSessionId: string, among?: readonly string[]): void {
-    const ids = among ?? [...this.sessions.keys()]
-    for (const id of ids) {
-      if (id === keepSessionId) continue
-      this.close(id)
-    }
-  }
-
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
     // so sessions are visible to the regular `pi` CLI.
