@@ -31,8 +31,6 @@ function makeSession(cwd: string) {
   return {
     sessionId: 's1',
     cwd,
-    setStartupInfo() {},
-    sendStartupInfoIfPending() {},
     proc: {
       async getAvailableModels() {
         return { models: [{ provider: 'test', id: 'alpha', name: 'Alpha' }] }

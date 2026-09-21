@@ -77,7 +77,7 @@ On top of upstream it adds (including George Harker's changes):
   - Adds a small set of built-in commands for headless/editor usage
   - Supports skill commands (if enabled in pi settings, they appear as `/skill:skill-name` in the ACP client)
 - Skills are loaded by pi directly and are available in ACP sessions
-- (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, `pi-acp` will still emit a 'New version available' message if the installed pi version is outdated.
+- (Zed) No startup “MOTD” is emitted into the session — the adapter sends nothing until the first real prompt (pi’s TUI header info is not mirrored into ACP sessions).
 - (Zed) Session history is supported in Zed starting with [`v0.225.0`](https://zed.dev/releases/preview/0.225.0). Session loading / history maps to pi's session files. Sessions can be resumed both in `pi` and in the ACP client.
 
 ## Prerequisites
@@ -386,8 +386,7 @@ MCP servers passed by the ACP client (`session/new`, `session/load`, `session/re
 into a **session-scoped temp file** and handed to [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter)
 via `pi --mode rpc --mcp-config <tempfile>`. stdio and http servers are supported; sse/acp servers
 cannot be expressed and are skipped with a notice. The temp file is removed when the session closes.
-Install `pi-mcp-adapter` in your pi `packages` for the servers to actually load — the adapter emits a
-startup notice when it is missing.
+Install `pi-mcp-adapter` in your pi `packages` for the servers to actually load.
 
 The temp file may hold secrets the client sent literally (an `Authorization` header value, or stdio
 `env` values), so it is written in an owner-only (`0700`) temp dir with `0600` permissions. To keep a

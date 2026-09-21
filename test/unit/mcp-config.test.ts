@@ -7,7 +7,6 @@ import type { McpServer } from '@agentclientprotocol/sdk'
 import {
   translateMcpServers,
   writeMcpConfig,
-  buildMcpNotice,
   loadMcpPolicy,
   cleanupStaleGeneratedConfig
 } from '../../src/acp/mcp-config.js'
@@ -110,39 +109,6 @@ test('cleanupStaleGeneratedConfig: removes a pi-acp-generated <cwd>/.pi/mcp.json
   }
 })
 
-test('buildMcpNotice: warns when adapter missing and lists skipped servers', () => {
-  const cwd = tmpCwd()
-  // Isolate the global agent dir so the machine's real pi settings don't affect the check.
-  const agentDir = tmpCwd()
-  const prev = process.env.PI_CODING_AGENT_DIR
-  process.env.PI_CODING_AGENT_DIR = agentDir
-  try {
-    const notice = buildMcpNotice(cwd, {
-      handle: { path: join(cwd, '.pi', 'mcp.json'), cleanup: () => {} },
-      skipped: ['streamy'],
-      preserved: []
-    })
-    assert.ok(notice)
-    assert.match(notice!, /pi-mcp-adapter/)
-    assert.match(notice!, /streamy/)
-  } finally {
-    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR
-    else process.env.PI_CODING_AGENT_DIR = prev
-    rmSync(cwd, { recursive: true, force: true })
-    rmSync(agentDir, { recursive: true, force: true })
-  }
-})
-
-test('buildMcpNotice: silent when nothing to report', () => {
-  const cwd = tmpCwd()
-  try {
-    const notice = buildMcpNotice(cwd, { handle: null, skipped: [], preserved: [] })
-    assert.equal(notice, null)
-  } finally {
-    rmSync(cwd, { recursive: true, force: true })
-  }
-})
-
 test('policy: exclude → server is not generated (deferred to user config); others still generated', () => {
   const servers: McpServer[] = [
     {
@@ -188,21 +154,6 @@ test('policy.auth: bearerTokenEnv → writes a $env: Authorization header (no se
   assert.equal(entry.headers['Authorization'], 'Bearer $env:FOO_TOKEN')
   assert.equal(entry.headers['X-Extra'], 'e')
   assert.equal(entry.headers['X-Session'], 'tok') // client header preserved
-})
-
-test('auth policy: preserved servers are surfaced in the notice', () => {
-  const cwd = tmpCwd()
-  try {
-    const notice = buildMcpNotice(cwd, {
-      handle: null,
-      skipped: [],
-      preserved: ['mcp-combiner']
-    })
-    assert.match(notice!, /deferred to your existing config/)
-    assert.match(notice!, /mcp-combiner/)
-  } finally {
-    rmSync(cwd, { recursive: true, force: true })
-  }
 })
 
 test('loadMcpPolicy: parses generate/exclude/auth; missing file → {}', () => {

@@ -817,47 +817,6 @@ test('PiAcpSession: prompt stays open through retry runs until agent_settled', a
   assert.equal(reason, 'end_turn')
 })
 
-test('PiAcpSession: does not re-emit startup info on first prompt after it was already sent', async () => {
-  const conn = new FakeAgentSideConnection()
-  const proc = new FakePiRpcProcess()
-
-  const session = new PiAcpSession({
-    sessionId: 's1',
-    cwd: process.cwd(),
-    mcpServers: [],
-    proc: proc as any,
-    conn: asAgentConn(conn),
-    fileCommands: []
-  })
-
-  const notice = 'New version available: v0.74.0 (installed v0.73.1).'
-
-  session.setStartupInfo(notice)
-  session.sendStartupInfoIfPending()
-  await new Promise(r => setTimeout(r, 0))
-
-  const p = session.prompt('hello')
-  await new Promise(r => setTimeout(r, 0))
-
-  assert.equal(proc.prompts.length, 1)
-  assert.equal(proc.prompts[0]!.message, 'hello')
-  const startupUpdates = conn.updates.filter(
-    entry =>
-      entry.update.sessionUpdate === 'agent_message_chunk' &&
-      (entry.update as any).content?.type === 'text' &&
-      (entry.update as any).content?.text === notice
-  )
-  assert.equal(startupUpdates.length, 1)
-
-  proc.emit({ type: 'agent_start' })
-  proc.emit({ type: 'turn_end' })
-  proc.emit({ type: 'agent_end' })
-  proc.emit({ type: 'agent_settled' })
-
-  const reason = await p
-  assert.equal(reason, 'end_turn')
-})
-
 test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()

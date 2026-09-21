@@ -47,9 +47,7 @@ test('PiAcpAgent: newSession returns configOptions for model and thinking select
             model: { provider: 'test', id: 'beta' }
           }
         }
-      },
-      setStartupInfo() {},
-      sendStartupInfoIfPending() {}
+      }
     }
 
     const agent = new PiAcpAgent(asAgentConn(conn), {} as any)

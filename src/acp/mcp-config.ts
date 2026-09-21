@@ -2,7 +2,6 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { McpServer } from '@agentclientprotocol/sdk'
-import { getAgentDir } from './pi-settings.js'
 import { getPiAcpMcpPolicyPath } from './paths.js'
 
 // Marker written into generated configs so we only ever overwrite / clean up files
@@ -257,48 +256,4 @@ export function cleanupStaleGeneratedConfig(cwd: string): void {
   } catch {
     // best effort
   }
-}
-
-/** Best-effort check of pi settings for a `pi-mcp-adapter` package entry. */
-export function piMcpAdapterInstalled(cwd: string): boolean {
-  const settingsPaths = [join(getAgentDir(), 'settings.json'), join(cwd, '.pi', 'settings.json')]
-  for (const p of settingsPaths) {
-    try {
-      const settings = JSON.parse(readFileSync(p, 'utf-8')) as { packages?: unknown }
-      const pkgs = Array.isArray(settings.packages) ? settings.packages : []
-      if (pkgs.some(pkg => typeof pkg === 'string' && pkg.includes('pi-mcp-adapter'))) return true
-    } catch {
-      // ignore missing / invalid settings
-    }
-  }
-  return false
-}
-
-/**
- * Build a one-time, human-readable notice about MCP wiring: which servers we could
- * not translate, and whether pi-mcp-adapter appears to be installed. Returns null
- * when there is nothing worth telling the user.
- */
-export function buildMcpNotice(
-  cwd: string,
-  result: Pick<WriteMcpConfigResult, 'handle' | 'skipped' | 'preserved'>
-): string | null {
-  const lines: string[] = []
-
-  if (result.handle && !piMcpAdapterInstalled(cwd)) {
-    lines.push(
-      'MCP servers were provided, but `pi-mcp-adapter` does not appear to be installed. ' +
-        'Add it to your pi settings `packages` (see https://github.com/nicobailon/pi-mcp-adapter) for the servers to load.'
-    )
-  }
-
-  if (result.preserved?.length) {
-    lines.push(`MCP servers deferred to your existing config (auth policy): ${result.preserved.join(', ')}.`)
-  }
-
-  if (result.skipped.length) {
-    lines.push(`Skipped MCP servers not expressible for pi (sse/acp): ${result.skipped.join(', ')}.`)
-  }
-
-  return lines.length ? lines.join('\n') : null
 }

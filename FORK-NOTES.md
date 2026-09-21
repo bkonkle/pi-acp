@@ -1,5 +1,30 @@
 Fork of georgeharker/pi-acp. Local patches:
 
+## 2026-09-21: remove startup-info MOTD entirely
+
+Problem: Zed sometimes ephemerally spins up a background agent thread "in case it needs it", then
+drops it. Our startup-info prelude (pi version, Context/Skills/Extensions lists, update notice,
+MCP wiring notice) was emitted as `agent_message_chunk` `session/update` notifications on
+`session/new` — including for those throwaway threads — which interfered with them.
+
+Fix: delete the whole prelude system rather than gating it. `session/new` no longer produces any
+agent-visible startup message:
+
+- `src/acp/agent.ts`: removed `buildStartupInfo`, `buildUpdateNotice`, `isSemver`/`compareSemver`,
+  the `quietStartup` branch, `buildMcpNotice` usage, the `sendStartupInfoIfPending` timer, and
+  `_meta.piAcp.startupInfo` from all three response sites.
+- `src/acp/session.ts`: removed `startupInfo`/`startupInfoSent` state, `setStartupInfo()`,
+  `sendStartupInfoIfPending()`.
+- `src/acp/pi-settings.ts`: removed `getQuietStartup` (the setting existed only to gate the MOTD).
+- `src/acp/mcp-config.ts`: removed `buildMcpNotice` and `piMcpAdapterInstalled` (notice-only).
+  The generated MCP config file itself is unchanged — servers still get wired to pi; we just no
+  longer chat about it. Skipped/preserved servers are visible in the generated config file.
+- Tests: deleted `test/unit/startup-info-*.test.ts`, dropped the MCP-notice tests from
+  `mcp-config.test.ts` and the re-emit test from `session-events.test.ts`.
+
+Local setting note: `quietStartup` in pi settings.json is no longer read by the adapter; pi's TUI
+still honors it for its own header. No pi-acp.json / settings.json changes are required.
+
 ## 2026-09-16: generic thread-title sync; auto-title extension moved to pi-setup
 
 The bundled `auto-title` extension is gone. Titling was the only ACP-specific producer left, and
