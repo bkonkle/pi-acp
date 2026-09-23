@@ -51,6 +51,27 @@ function gatewayAction(args: any): string | undefined {
 }
 
 /**
+ * Models sometimes address the namespace proxy with an already server-prefixed
+ * tool name — "server.tool", "server_tool", or "raw-server_tool" (the adapter's
+ * executeCall resolves all of these). Strip the redundant prefix so the title
+ * doesn't double up ("notion_notion_notion-fetch"). Only `.` and `_` count as
+ * prefix separators: many upstream tools genuinely start with "<server>-"
+ * (e.g. notion's "notion-fetch"), and stripping that would mangle bare names.
+ * The proxy name carries the sanitized server namespace (dashes → underscores),
+ * so both that form and the raw dashed form are stripped.
+ */
+function stripServerPrefix(tool: string, server: string): string {
+  const raw = server.replace(/_/g, '-')
+  for (const name of [server, raw]) {
+    for (const sep of ['.', '_']) {
+      const prefix = `${name}${sep}`
+      if (tool.startsWith(prefix) && tool.length > prefix.length) return tool.slice(prefix.length)
+    }
+  }
+  return tool
+}
+
+/**
  * Build the ACP tool-call title for a pi tool invocation.
  * Falls back to the bare tool name when nothing better is derivable.
  */
@@ -59,7 +80,7 @@ export function toolCallTitle(toolName: string, args: any): string {
   if (toolName.startsWith('mcp__')) {
     const server = toolName.slice('mcp__'.length)
     const inner = args && typeof args === 'object' && typeof args.tool === 'string' ? args.tool : undefined
-    if (inner) return truncate(`${server}_${inner.replace(/\./g, '_')}`)
+    if (inner) return truncate(`${server}_${stripServerPrefix(inner.replace(/\./g, '_'), server)}`)
     return truncate(toolName)
   }
 

@@ -21,6 +21,17 @@ test('toolCallTitle: namespace proxy mcp__<server> prefixes the inner tool', () 
   assert.equal(toolCallTitle('mcp__slack', {}), 'mcp__slack')
 })
 
+test('toolCallTitle: namespace proxy does not double an already-prefixed inner tool', () => {
+  // Models sometimes pass the adapter's direct-registered name or a dotted
+  // fully-qualified name to the namespace proxy; the server prefix must appear once.
+  assert.equal(toolCallTitle('mcp__notion', { tool: 'notion_notion-fetch', args: {} }), 'notion_notion-fetch')
+  assert.equal(toolCallTitle('mcp__notion', { tool: 'notion.notion-fetch', args: {} }), 'notion_notion-fetch')
+  assert.equal(toolCallTitle('mcp__agent_memory', { tool: 'agent-memory_remember', args: {} }), 'agent_memory_remember')
+  assert.equal(toolCallTitle('mcp__agent_memory', { tool: 'agent_memory_remember', args: {} }), 'agent_memory_remember')
+  // Bare inner names are untouched (dashes are not prefix separators).
+  assert.equal(toolCallTitle('mcp__notion', { tool: 'notion-fetch', args: {} }), 'notion_notion-fetch')
+})
+
 test('toolCallTitle: mcpScript shows the first meaningful statement', () => {
   const code = [
     '// find open prs',

@@ -1,5 +1,24 @@
 Fork of georgeharker/pi-acp. Local patches:
 
+## 2026-09-23: no double server prefix in tool-call titles
+
+Problem: MCP tool calls showed doubled server prefixes in Zed —
+`notion_notion_notion-fetch`, `agent_memory_agent-memory_remember`. The model
+often addresses the `mcp__<server>` namespace proxy with an already server-prefixed
+inner tool name (`notion_notion-fetch`, `agent-memory_remember`, or the dotted
+`server.tool` form — pi-mcp-adapter's `executeCall` resolves all of these), and
+`toolCallTitle` unconditionally prepended the server name again.
+
+Fix: `src/acp/tool-title.ts` strips a leading `<server>.` / `<server>_` prefix
+(sanitized and raw-dash server forms) from the inner tool name before composing
+the title, so the prefix appears exactly once: `notion_notion-fetch`,
+`agent_memory_remember`. Bare inner names are untouched — dashes are not treated
+as prefix separators, since many upstream tools genuinely start with
+`<server>-` (e.g. notion's `notion-fetch`).
+
+Tests: new cases in `test/unit/tool-title.test.ts` cover the prefixed, dotted,
+sanitized, and bare inner-name forms.
+
 ## 2026-09-21: remove startup-info MOTD entirely
 
 Problem: Zed sometimes ephemerally spins up a background agent thread "in case it needs it", then
