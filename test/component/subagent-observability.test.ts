@@ -33,7 +33,7 @@ function cards(conn: FakeAgentSideConnection) {
     )
 }
 
-test('detached agents get an inspectable row with activity, final output and clickable artifacts', async () => {
+test('detached agents use native status rows without transcript dumps and retain a clickable output row', async () => {
   const { proc, conn } = setup()
   proc.emit(
     entry('acp:subagents', {
@@ -71,18 +71,31 @@ test('detached agents get an inspectable row with activity, final output and cli
   assert.equal(rows[0].sessionUpdate, 'tool_call')
   assert.equal(rows[0].status, 'in_progress')
   assert.equal(rows[1].status, 'in_progress')
-  assert.match(JSON.stringify(rows[1].content), /Reading the auth middleware/)
-  assert.match(JSON.stringify(rows[1].content), /Last output activity/)
-  assert.match(JSON.stringify(rows[1].content), /file:\/\/\/tmp\/auth%20output.txt/)
-  assert.deepEqual(rows[1].locations, [{ path: '/tmp/auth output.txt' }, { path: '/tmp/auth.jsonl' }])
+  for (const row of rows) {
+    assert.equal(row._meta?.tool_name, 'spawn_agent', 'Zed native subagent renderer contract')
+    assert.equal(row._meta?.subagent_session_info, undefined, 'do not advertise an unavailable child preview')
+    assert.ok(!JSON.stringify(row).includes('Reading the auth middleware'))
+    assert.ok(!JSON.stringify(row).includes('Found a missing authorization check'))
+  }
+  assert.match(rows[1].title ?? '', /Find auth · 3 tools · 11s/)
+  assert.equal(rows[1].rawOutput && (rows[1].rawOutput as { lastActivityAt: number }).lastActivityAt, 11_000)
+  const artifacts = conn.updates
+    .map(u => u.update)
+    .filter(
+      u =>
+        (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') &&
+        u.toolCallId === 'pi-agent-output-child'
+    )
+  assert.equal(artifacts.length, 1, 'heartbeat and completion do not repeat unchanged file links')
+  const artifact = artifacts[0]
+  assert.ok(artifact.sessionUpdate === 'tool_call')
+  assert.equal(artifact.kind, 'read')
+  assert.equal(artifact._meta?.tool_name, undefined, 'file access uses the normal clickable renderer')
+  assert.match(JSON.stringify(artifact.content), /file:\/\/\/tmp\/auth%20output.txt/)
+  assert.match(JSON.stringify(artifact.content), /file:\/\/\/tmp\/auth.jsonl/)
+  assert.deepEqual(artifact.locations, [{ path: '/tmp/auth output.txt' }], 'primary Go to File target')
   assert.equal(rows[2].status, 'completed')
-  assert.match(JSON.stringify(rows[2].content), /Found a missing authorization check/)
   assert.equal(rows[3].status, 'completed', 'late lifecycle entries must not reopen a finished row')
-  assert.match(
-    JSON.stringify(rows[3].content),
-    /Found a missing authorization check/,
-    'sparse updates preserve final output'
-  )
 })
 
 test('idle process death and session disposal close unfinished rows and detach old event handlers', async () => {
@@ -151,7 +164,10 @@ test('resume restores active-branch output, marks orphaned execution interrupted
   const { proc, conn, session } = setup()
   await session.restoreTracking(path)
   assert.equal(cards(conn).at(-1)?.status, 'failed')
-  assert.match(JSON.stringify(cards(conn).at(-1)?.content), /Partial findings/)
+  assert.ok(!JSON.stringify(cards(conn).at(-1)).includes('Partial findings'))
+  assert.ok(
+    conn.updates.some(u => u.update.sessionUpdate === 'tool_call' && u.update.toolCallId === 'pi-agent-output-child')
+  )
   assert.ok(!JSON.stringify(conn.updates).includes('wrong-branch'))
   const plan = conn.updates
     .map(u => u.update)

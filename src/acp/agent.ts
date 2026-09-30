@@ -37,6 +37,7 @@ import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
+import { compactSubagentText, isSubagentInvocationTool } from './translate/subagent-tools.js'
 import {
   bashCommand,
   bashExitCode,
@@ -1088,6 +1089,7 @@ export class PiAcpAgent implements ACPAgent {
           continue
         }
 
+        const compact = isSubagentInvocationTool(toolName)
         // Create a synthetic ACP tool call to render historic tool usage.
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
@@ -1098,11 +1100,12 @@ export class PiAcpAgent implements ACPAgent {
             kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
             status: 'completed',
             rawInput: null,
-            rawOutput: m
+            ...(compact ? {} : { rawOutput: m })
           }
         })
 
-        const text = toolResultToText(m)
+        const output = toolResultToText(m)
+        const text = compact ? compactSubagentText(output) : output
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
           update: {
@@ -1110,7 +1113,7 @@ export class PiAcpAgent implements ACPAgent {
             toolCallId,
             status: isError ? 'failed' : 'completed',
             content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
-            rawOutput: m
+            ...(compact ? {} : { rawOutput: m })
           }
         })
       }

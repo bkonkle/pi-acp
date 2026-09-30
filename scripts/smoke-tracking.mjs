@@ -39,7 +39,7 @@ export default function(pi) {
   globalThis[Symbol.for('pi-subagents:manager')] = { getRecord: id => records.get(id) };
   pi.registerCommand('tracking-smoke-start', { description: 'Offline smoke fixture', handler: (_args, ctx) => {
     const outputFile = join(ctx.cwd, 'child.output');
-    writeFileSync(outputFile, 'Live child output');
+    writeFileSync(outputFile, 'Live child output\\n' + 'Full transcript content\\n'.repeat(5000));
     records.set('smoke-child', {id: 'smoke-child', description: 'Offline smoke child', status: 'running',
       rootSessionId: ctx.sessionManager.getSessionId(), startedAt: Date.now(), outputFile, toolUses: 1});
     pi.events.emit('subagents:started', {id: 'smoke-child'});
@@ -121,12 +121,18 @@ try {
     'handled commands finish without model events'
   )
   const live = await waitFor(
-    m =>
-      m.params?.update?.toolCallId === 'pi-subagent-smoke-child' &&
-      JSON.stringify(m.params.update.content).includes('Live child output')
+    m => m.params?.update?.toolCallId === 'pi-subagent-smoke-child' && m.params.update.status === 'in_progress'
   )
-  assert.equal(live.params.update.status, 'in_progress')
-  assert.equal(realpathSync(live.params.update.locations[0].path), realpathSync(join(cwd, 'child.output')))
+  assert.equal(live.params.update._meta.tool_name, 'spawn_agent', 'Zed native renderer metadata')
+  assert.ok(JSON.stringify(live.params.update).length < 2000, 'status rows stay small')
+  assert.ok(!JSON.stringify(live.params.update).includes('Full transcript content'))
+  const artifact = await waitFor(m => m.params?.update?.toolCallId === 'pi-agent-output-smoke-child')
+  assert.equal(artifact.params.update.kind, 'read')
+  assert.equal(artifact.params.update._meta.tool_name, undefined)
+  assert.equal(realpathSync(artifact.params.update.locations[0].path), realpathSync(join(cwd, 'child.output')))
+  const fullOutput = readFileSync(join(cwd, 'child.output'), 'utf8')
+  assert.ok(fullOutput.length > 32_000, 'full transcript is not capped at the old preview limit')
+  assert.match(fullOutput, /Live child output/)
   assert.equal((await prompt('/tracking-smoke-abort')).stopReason, 'end_turn')
   const terminal = await waitFor(
     m => m.params?.update?.toolCallId === 'pi-subagent-smoke-child' && m.params.update.status === 'failed'
@@ -135,7 +141,7 @@ try {
   assert.ok(!existsSync(join(cwd, '.pi')), 'no generated task files enter the workspace')
   assert.equal(readFileSync(join(cwd, 'TODO.md'), 'utf8'), '- [ ] Human document\n')
   console.log(
-    'Real Pi RPC smoke passed: external plan, handled command completion, live card output, file link, silent cancellation.'
+    'Real Pi RPC smoke passed: external plan, handled command completion, native status row, full output file, silent cancellation.'
   )
 } finally {
   for (const item of pending.values()) clearTimeout(item.timer)

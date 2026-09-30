@@ -72,6 +72,7 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
 
     // 2) load session: mock spawn to return fake proc with getMessages
     const originalSpawn = PiRpcProcess.spawn
+    const fullSubagentResult = 'A useful finding\n'.repeat(10000)
 
     ;(PiRpcProcess as any).spawn = async (params: any) => {
       // ensure loadSession resolves to some jsonl that ends with our expected filename
@@ -86,7 +87,13 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
         getMessages: async () => ({
           messages: [
             { role: 'user', content: 'Hello' },
-            { role: 'assistant', content: [{ type: 'text', text: 'Hi there!' }] }
+            { role: 'assistant', content: [{ type: 'text', text: 'Hi there!' }] },
+            ...['Agent', 'get_subagent_result'].map(toolName => ({
+              role: 'toolResult',
+              toolName,
+              toolCallId: toolName,
+              content: [{ type: 'text', text: fullSubagentResult }]
+            }))
           ]
         }),
         getAvailableModels: async () => ({ models: [] }),
@@ -105,6 +112,20 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
 
       assert.ok(texts.some(t => t.kind === 'user_message_chunk' && t.text === 'Hello'))
       assert.ok(texts.some(t => t.kind === 'agent_message_chunk' && t.text === 'Hi there!'))
+      const subagentTools = conn.updates
+        .map(u => u.update)
+        .filter(
+          u =>
+            (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') &&
+            ['Agent', 'get_subagent_result'].includes(u.toolCallId)
+        )
+      assert.equal(subagentTools.length, 4)
+      for (const tool of subagentTools) {
+        assert.ok(JSON.stringify(tool).length < 2000, 'history replay must not restore huge tool dumps')
+        assert.ok(!('rawOutput' in tool))
+      }
+      assert.match(JSON.stringify(subagentTools), /A useful finding/)
+      assert.match(JSON.stringify(subagentTools), /Preview only/)
     } finally {
       PiRpcProcess.spawn = originalSpawn
     }

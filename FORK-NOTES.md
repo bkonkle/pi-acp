@@ -1,5 +1,26 @@
 Fork of georgeharker/pi-acp. Local patches:
 
+## Native Zed subagent status rows
+
+The previous synthetic cards embedded up to 32,000 characters of transcript on every update.
+They were noisy and still truncated. `subagentToolCall` now uses `_meta.tool_name: "spawn_agent"`,
+which Zed 1.21.0 recognizes in `ToolCall::is_subagent()` and routes to `render_subagent_card()`.
+Zed supplies its own spinner/checkmark/error visuals; the adapter keeps the existing execution
+lifecycle, interruption detection, and active-branch restoration.
+
+Zed does not render an external child's preview without a registered child thread. No fake
+`subagent_session_info` is sent. A compact read-kind companion row provides output/session file
+links and a primary Go to File location, without copying the transcript into the parent thread.
+Unchanged artifact links are not repeatedly emitted on observer heartbeats. Errors remain
+readable even without a transcript file.
+
+`Agent` and `get_subagent_result` display previews are bounded in live updates and history replay;
+full prompt/result data stays in Pi, but isn't duplicated into ACP `rawInput`/`rawOutput`.
+Tests cover native metadata, lifecycle order, artifacts, oversized results, and replay. The real
+RPC smoke verifies native status rows, a full transcript larger than the old limit, and silent abort.
+
+Source contract: https://github.com/zed-industries/zed/blob/v1.21.0/crates/acp_thread/src/acp_thread.rs#L1261-L1264
+
 ## 2026-09-23: no double server prefix in tool-call titles
 
 Problem: MCP tool calls showed doubled server prefixes in Zed —

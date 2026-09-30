@@ -76,6 +76,12 @@ function stripServerPrefix(tool: string, server: string): string {
  * Falls back to the bare tool name when nothing better is derivable.
  */
 export function toolCallTitle(toolName: string, args: any): string {
+  if (toolName === 'Agent' && typeof args?.description === 'string' && args.description.trim()) {
+    return truncate(`Launch: ${args.description}`)
+  }
+  if (toolName === 'get_subagent_result' && typeof args?.agent_id === 'string') {
+    return truncate(`Result: ${args.agent_id}`)
+  }
   // Namespace proxies ("mcp__<server>"): args.tool is the server-local tool name.
   if (toolName.startsWith('mcp__')) {
     const server = toolName.slice('mcp__'.length)

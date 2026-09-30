@@ -222,10 +222,23 @@ Extension commands can be invoked by typing their slash command, but are not adv
 pi itself emits no ACP plans, so the ACP `plan` (task-list) channel is unused. When you use the
 [pi-subagents](https://github.com/tintinweb/pi-subagents) extension, pi-acp can surface the running
 subagent fleet as an ACP plan — each subagent becomes a task with `pending` / `in_progress` /
-`completed` status. Each also gets a separate expandable ACP tool card containing a live output
-preview, final result/error, elapsed time, observed status, last output activity, and clickable
-output/transcript file locations. Background `Agent` calls can finish returning an id while these
-execution cards continue updating.
+`completed` status. Each also gets a compact execution row. In Zed 1.21.0, `_meta.tool_name:
+"spawn_agent"` selects Zed's native subagent header: its spinner while queued/running, a checkmark
+on completion, and an error icon on failure. Titles carry the task, elapsed time, and tool count;
+status observations and output-activity timestamps remain structured metadata, not transcript text.
+Background `Agent` calls can return an id while their execution rows continue updating.
+
+A small **Full output** companion row links to the existing output/session files; its Go to File
+action opens the primary file in the editor. It is a file reference, not another running agent.
+No transcript is embedded in the status row. `Agent` and `get_subagent_result` tool displays,
+including replayed history, use previews capped at eight lines / 800 characters and omit raw-output
+copies that would bypass that limit. Full tool results delivered to Pi are unchanged. If transcripts
+are disabled, no new recording is created; failure details still get a compact readable row.
+
+This does **not** implement Zed's expandable child-thread preview or full-screen child navigation.
+Those require a child thread registered inside Zed, which external ACP tool notifications do not
+currently provide. We deliberately do not advertise a fictitious child session. Other ACP clients
+ignore the Zed metadata and receive the same compact status and file rows.
 
 Because pi's RPC mode does not forward pi's in-process event bus (`subagents:*`), the bridging is
 done by a pi extension. The `pi-acp` package doubles as that extension (`src/pi-extension.ts`,
@@ -254,7 +267,7 @@ cancellation and turn-limit completion. It persists changed previews at most eve
 and status observations every ten seconds; those observations are not proof of output progress.
 
 Process death, session replacement, and shutdown close unfinished cards as interrupted. Resume
-restores active-branch tracking records and final output, but never claims an old process's agents
+restores active-branch tracking records and output-file links, but never claims an old process's agents
 are still running. Detached agents can continue after the parent prompt is cancelled; cancelling
 the prompt alone does not claim to have stopped them. Extension listeners/timers are released on
 shutdown and rebound on reload. The upstream lifecycle bus excludes workflow-owned and nested

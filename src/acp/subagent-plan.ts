@@ -243,9 +243,12 @@ export function toPlanEntries(agents: Iterable<BridgeSubagent>): PlanEntry[] {
   return Array.from(agents, toPlanEntry)
 }
 
-const CARD_OUTPUT_MAX = 32_000
+function agentLabel(agent: BridgeSubagent): string {
+  const label = (agent.description?.trim() || agent.id).replace(/\s+/g, ' ')
+  return label.length > 100 ? label.slice(0, 99) + '…' : label
+}
 
-/** A separate ACP tool row keeps detached execution inspectable after Agent returns its id. */
+/** Zed recognizes this metadata and supplies its native spinner/checkmark subagent header. */
 export function subagentToolCall(agent: BridgeSubagent): ToolCall {
   const rawStatus = String(agent.status ?? 'queued').toLowerCase()
   const terminal = statusRank(rawStatus) === 2
@@ -256,57 +259,63 @@ export function subagentToolCall(agent: BridgeSubagent): ToolCall {
       : statusRank(rawStatus) === 1
         ? 'in_progress'
         : 'pending'
-  const label = agent.description?.trim() || agent.id
   const state = rawStatus === 'started' ? 'running' : rawStatus === 'created' ? 'queued' : rawStatus
-  const lines = [`**${state}** · agent \`${agent.id}\``]
+  const stats: string[] = []
   const end = agent.completedAt ?? agent.observedAt
   const duration =
     agent.durationMs ?? (end != null && agent.startedAt != null ? Math.max(0, end - agent.startedAt) : undefined)
-  if (duration != null) lines.push(`Elapsed: ${Math.floor(duration / 1000)}s`)
-  if (agent.toolUses != null) lines.push(`Tool uses: ${agent.toolUses}`)
-  if (agent.observedAt != null) lines.push(`Status observed: ${new Date(agent.observedAt).toISOString()}`)
-  if (agent.lastActivityAt != null) lines.push(`Last output activity: ${new Date(agent.lastActivityAt).toISOString()}`)
-  else if (!terminal) lines.push('No output activity observed yet; a running status is not proof of progress.')
-  if (agent.error) lines.push(`\n${agent.error.slice(0, CARD_OUTPUT_MAX)}`)
-  const output = agent.result ?? agent.latestOutput
-  if (output) {
-    const preview =
-      output.length > CARD_OUTPUT_MAX
-        ? output.slice(0, CARD_OUTPUT_MAX) + '\n[Preview truncated; open the output file for the rest.]'
-        : output
-    lines.push(`\n${terminal ? 'Result' : 'Latest output'}:\n\n${preview}`)
-  }
-  const paths = [
-    ...new Set([agent.outputFile, agent.sessionFile].filter((p): p is string => typeof p === 'string' && isAbsolute(p)))
-  ]
-  const content: ToolCallContent[] = [{ type: 'content', content: { type: 'text', text: lines.join('\n') } }]
-  for (const path of paths) {
-    content.push({
-      type: 'content',
-      content: {
-        type: 'resource_link',
-        uri: pathToFileURL(path).href,
-        name: path === agent.outputFile ? 'Full subagent output' : 'Subagent session transcript'
-      }
-    })
-  }
+  if (agent.toolUses != null) stats.push(`${agent.toolUses} tools`)
+  if (duration != null) stats.push(`${Math.floor(duration / 1000)}s`)
+  const title = [agentLabel(agent), ...(state === 'running' || state === 'completed' ? [] : [state]), ...stats].join(
+    ' · '
+  )
+  // Zed does not render tool content inside a native header without a registered child thread.
+  // Keep this useful for other ACP clients, but never copy the transcript into the parent row.
+  const text = [state, agent.error?.slice(0, 500)].filter(Boolean).join(': ')
   return {
     toolCallId: `pi-subagent-${agent.id}`,
-    title: `Subagent: ${agent.type ? `[${agent.type}] ` : ''}${label} — ${state}`,
+    title,
     kind: 'other',
     status,
-    content,
-    ...(paths.length ? { locations: paths.map(path => ({ path })) } : {}),
+    content: [{ type: 'content', content: { type: 'text', text } }],
     rawOutput: {
       agentId: agent.id,
       status: rawStatus,
       startedAt: agent.startedAt,
       completedAt: agent.completedAt,
       observedAt: agent.observedAt,
-      lastActivityAt: agent.lastActivityAt,
-      outputFile: agent.outputFile,
-      sessionFile: agent.sessionFile
+      lastActivityAt: agent.lastActivityAt
     },
-    _meta: { piAcp: { subagentId: agent.id } }
+    _meta: { tool_name: 'spawn_agent', piAcp: { subagentId: agent.id } }
+  }
+}
+
+/** A separate file row remains clickable even though Zed cannot preview an external child thread. */
+export function subagentOutputToolCall(agent: BridgeSubagent, keepRow = false): ToolCall | null {
+  const paths = [
+    ...new Set([agent.outputFile, agent.sessionFile].filter((p): p is string => typeof p === 'string' && isAbsolute(p)))
+  ]
+  // Clear a previous run's error row when a resumed execution has no transcript.
+  if (!paths.length && !agent.error && !keepRow) return null
+  const content: ToolCallContent[] = paths.map(path => ({
+    type: 'content',
+    content: {
+      type: 'resource_link',
+      uri: pathToFileURL(path).href,
+      name: path === agent.outputFile ? 'Full subagent output' : 'Subagent session transcript'
+    }
+  }))
+  if (agent.error) content.unshift({ type: 'content', content: { type: 'text', text: agent.error.slice(0, 500) } })
+  if (!content.length)
+    content.push({ type: 'content', content: { type: 'text', text: 'No transcript file is available.' } })
+  return {
+    toolCallId: `pi-agent-output-${agent.id}`,
+    title: `${paths.length ? 'Full output' : agent.error ? 'Error details' : 'Output unavailable'}: ${agentLabel(agent)}`,
+    kind: paths.length ? 'read' : 'other',
+    status: 'completed',
+    content,
+    // One primary location gives Zed a Go to File action in the collapsed row.
+    locations: paths.length ? [{ path: paths[0]! }] : [],
+    _meta: { piAcp: { subagentId: agent.id, artifact: true } }
   }
 }

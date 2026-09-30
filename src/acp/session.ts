@@ -30,6 +30,7 @@ import {
   isBashTool
 } from './translate/bash.js'
 import { toolResultToText } from './translate/pi-tools.js'
+import { compactSubagentText, isSubagentInvocationTool, subagentDisplayInput } from './translate/subagent-tools.js'
 import { getDefaultModel, getPiAcpDebug } from './pi-acp-settings.js'
 import {
   SUBAGENT_PLAN_CUSTOM_TYPE,
@@ -39,6 +40,7 @@ import {
   parseSubagentRecord,
   statusRank,
   subagentToolCall,
+  subagentOutputToolCall,
   toPlanEntries,
   type BridgeSubagent
 } from './subagent-plan.js'
@@ -327,6 +329,7 @@ export class PiAcpSession {
   private subagentFleet = new Map<string, BridgeSubagent>()
   private planState = newPlanState()
   private readonly subagentCards = new Set<string>()
+  private readonly subagentArtifactSignatures = new Map<string, string>()
   private readonly unsubscribe: Array<() => void> = []
   private closed = false
 
@@ -339,6 +342,7 @@ export class PiAcpSession {
   /** Last title we sent per tool call, so streaming args can upgrade it in place. */
   private lastToolCallTitles = new Map<string, string>()
   private bashOutputSnapshots = new Map<string, string>()
+  private readonly compactSubagentToolCalls = new Set<string>()
 
   // ACP messageId grouping: chunks belonging to the same assistant message share a messageId.
   // pi's `message_start` event begins a new message; the id is assigned lazily on first chunk.
@@ -676,6 +680,7 @@ export class PiAcpSession {
     this.bashToolCallIds.delete(toolCallId)
     this.bashOutputSnapshots.delete(toolCallId)
     this.lastToolCallTitles.delete(toolCallId)
+    this.compactSubagentToolCalls.delete(toolCallId)
   }
 
   private startTurn(t: QueuedTurn): void {
@@ -772,6 +777,17 @@ export class PiAcpSession {
     const exists = this.subagentCards.has(agent.id)
     this.subagentCards.add(agent.id)
     this.emit(exists ? { sessionUpdate: 'tool_call_update', ...call } : { sessionUpdate: 'tool_call', ...call })
+    const previous = this.subagentArtifactSignatures.get(agent.id)
+    const artifact = subagentOutputToolCall(agent, previous !== undefined)
+    if (artifact) {
+      const signature = JSON.stringify(artifact)
+      if (signature !== previous) {
+        this.subagentArtifactSignatures.set(agent.id, signature)
+        this.emit(
+          previous ? { sessionUpdate: 'tool_call_update', ...artifact } : { sessionUpdate: 'tool_call', ...artifact }
+        )
+      }
+    }
   }
 
   private interruptSubagents(error: string): void {
@@ -899,6 +915,8 @@ export class PiAcpSession {
                     }
                   })()
 
+            if (isSubagentInvocationTool(toolName)) this.compactSubagentToolCalls.add(toolCallId)
+            const displayInput = subagentDisplayInput(toolName, rawInput)
             const locations = toToolCallLocations(rawInput, this.cwd)
             const existingStatus = this.currentToolCalls.get(toolCallId)
             // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
@@ -926,7 +944,7 @@ export class PiAcpSession {
                 kind: toToolKind(toolName),
                 status,
                 locations,
-                rawInput
+                rawInput: displayInput
               })
             } else {
               // Best-effort: keep rawInput (and a derived title, once args
@@ -938,7 +956,7 @@ export class PiAcpSession {
                 ...this.titleUpdate(toolCallId, toolName, rawInput),
                 status,
                 locations,
-                rawInput
+                rawInput: displayInput
               })
             }
           }
@@ -954,6 +972,7 @@ export class PiAcpSession {
         const toolCallId = String((ev as any).toolCallId ?? crypto.randomUUID())
         const toolName = String((ev as any).toolName ?? 'tool')
         const args = (ev as any).args
+        if (isSubagentInvocationTool(toolName)) this.compactSubagentToolCalls.add(toolCallId)
         let line: number | undefined
 
         if (isBashTool(toolName)) {
@@ -1011,7 +1030,7 @@ export class PiAcpSession {
             kind: toToolKind(toolName),
             status: 'in_progress',
             locations,
-            rawInput: args
+            rawInput: subagentDisplayInput(toolName, args)
           })
         } else {
           this.currentToolCalls.set(toolCallId, 'in_progress')
@@ -1021,7 +1040,7 @@ export class PiAcpSession {
             ...this.titleUpdate(toolCallId, toolName, args),
             status: 'in_progress',
             locations,
-            rawInput: args
+            rawInput: subagentDisplayInput(toolName, args)
           })
         }
 
@@ -1038,7 +1057,9 @@ export class PiAcpSession {
           break
         }
 
-        const text = this.fileMutationToolCallIds.has(toolCallId) ? '' : toolResultToText(partial)
+        const compact = this.compactSubagentToolCalls.has(toolCallId)
+        const output = this.fileMutationToolCallIds.has(toolCallId) ? '' : toolResultToText(partial)
+        const text = compact ? compactSubagentText(output) : output
 
         this.emit({
           sessionUpdate: 'tool_call_update',
@@ -1047,7 +1068,7 @@ export class PiAcpSession {
           content: text
             ? ([{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[])
             : undefined,
-          ...(this.fileMutationToolCallIds.has(toolCallId) ? {} : { rawOutput: partial })
+          ...(this.fileMutationToolCallIds.has(toolCallId) || compact ? {} : { rawOutput: partial })
         })
         break
       }
@@ -1069,7 +1090,9 @@ export class PiAcpSession {
           break
         }
 
-        const text = toolResultToText(result)
+        const compact = this.compactSubagentToolCalls.has(toolCallId)
+        const output = toolResultToText(result)
+        const text = compact ? compactSubagentText(output) : output
 
         const snapshot = this.fileSnapshots.get(toolCallId)
         let content: ToolCallContent[] | undefined
@@ -1104,7 +1127,7 @@ export class PiAcpSession {
           toolCallId,
           status: isError ? 'failed' : 'completed',
           content,
-          ...(hasStructuredDiff ? {} : { rawOutput: result })
+          ...(hasStructuredDiff || compact ? {} : { rawOutput: result })
         })
 
         this.cleanupToolCall(toolCallId)
