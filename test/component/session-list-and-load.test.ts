@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -10,9 +10,11 @@ import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
 // We mock PiRpcProcess.spawn so loadSession doesn't actually spawn `pi`.
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 
-test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history', async () => {
+test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history', async t => {
   // Create a fake PI_CODING_AGENT_DIR with one session.
   const root = mkdtempSync(join(tmpdir(), 'pi-acp-test-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  writeFileSync(join(root, 'pi-acp.json'), JSON.stringify({ dataDir: join(root, 'acp-state') }))
   const sessionsDir = join(root, 'sessions', '--tmp--project--')
   const sessionFile = join(sessionsDir, '0000_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl')
 
@@ -49,6 +51,29 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
         parentId: 'b2c3d4e5',
         timestamp: '2026-02-11T00:00:03.000Z',
         name: 'My Named Session'
+      }),
+      JSON.stringify({
+        type: 'custom',
+        id: 'child-tracking',
+        parentId: 'c3d4e5f6',
+        customType: 'acp:subagents',
+        data: {
+          id: 'tracked-child',
+          toolCallId: 'launch',
+          description: 'Check permissions',
+          prompt: 'Check authorization',
+          status: 'completed',
+          result: 'Permission checks passed.',
+          activityTools: [
+            {
+              id: 'read-auth',
+              name: 'read',
+              title: 'src/auth.ts',
+              status: 'completed',
+              output: 'Permission check found'
+            }
+          ]
+        }
       })
     ].join('\n') + '\n',
     { encoding: 'utf8' }
@@ -77,7 +102,7 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
     ;(PiRpcProcess as any).spawn = async (params: any) => {
       // ensure loadSession resolves to some jsonl that ends with our expected filename
       assert.ok(typeof params.sessionPath === 'string')
-      assert.ok(params.sessionPath.endsWith('/0000_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl'))
+      assert.equal(params.sessionPath, sessionFile)
 
       return {
         onExit: () => () => {},
@@ -88,6 +113,13 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
           messages: [
             { role: 'user', content: 'Hello' },
             { role: 'assistant', content: [{ type: 'text', text: 'Hi there!' }] },
+            {
+              role: 'toolResult',
+              toolName: 'Agent',
+              toolCallId: 'launch',
+              details: { agentId: 'tracked-child' },
+              content: [{ type: 'text', text: 'Agent started in background.' }]
+            },
             ...['Agent', 'get_subagent_result'].map(toolName => ({
               role: 'toolResult',
               toolName,
@@ -126,6 +158,21 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
       }
       assert.match(JSON.stringify(subagentTools), /A useful finding/)
       assert.match(JSON.stringify(subagentTools), /Preview only/)
+      assert.ok(
+        !conn.updates.some(
+          u =>
+            (u.update.sessionUpdate === 'tool_call' || u.update.sessionUpdate === 'tool_call_update') &&
+            u.update.toolCallId === 'launch'
+        ),
+        'tracked launch replay must not duplicate its execution card'
+      )
+      const child = conn.updates.find(
+        u => u.update.sessionUpdate === 'tool_call' && u.update.toolCallId === 'pi-subagent-tracked-child'
+      )?.update
+      assert.ok(child?.sessionUpdate === 'tool_call')
+      assert.match(String(child.rawInput), /Check authorization/)
+      assert.match(JSON.stringify(child.content), /Permission check found/)
+      assert.match(JSON.stringify(child.content), /Permission checks passed/)
     } finally {
       PiRpcProcess.spawn = originalSpawn
     }

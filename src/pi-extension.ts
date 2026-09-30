@@ -1,5 +1,6 @@
 /** Persist the in-process subagent/plan bus for the external ACP RPC adapter. */
 import { open } from 'node:fs/promises'
+import { SubagentActivityCollector, type SubagentToolActivity } from './subagent-activity.js'
 
 const CUSTOM_TYPE = 'acp:subagents'
 const PLAN_CUSTOM_TYPE = 'acp:plan'
@@ -19,13 +20,15 @@ interface Context {
   mode?: string
   sessionManager?: { getSessionId(): string; getHeader?(): { parentSession?: string } | null }
 }
-type Agent = { id: string; status: string } & Record<string, string | number | undefined>
+type Agent = { id: string; status: string } & Record<string, string | number | SubagentToolActivity[] | undefined>
 interface Tracked {
   agent: Agent
   dirty: boolean
   persistedAt?: number
   fingerprint?: string
   needsFinal: boolean
+  activity?: { session: Record<string, unknown>; collector: SubagentActivityCollector; unsubscribe?: () => void }
+  activitySignature?: string
 }
 interface Binding {
   sessionId: string
@@ -56,9 +59,9 @@ function object(value: unknown): Record<string, unknown> | undefined {
 }
 function bounded(text: string): string {
   const bytes = Buffer.from(text)
-  let start = Math.max(0, bytes.length - PREVIEW_BYTES)
-  while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start++
-  return bytes.subarray(start).toString('utf8')
+  let end = Math.min(bytes.length, PREVIEW_BYTES)
+  while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--
+  return bytes.subarray(0, end).toString('utf8')
 }
 function fields(value: Record<string, unknown>): Partial<Agent> {
   const result: Partial<Agent> = {}
@@ -115,6 +118,47 @@ export default function (pi: PiExtensionApi): void {
       tracked.agent.durationMs = Math.max(0, completedAt - startedAt)
     }
   }
+  const captureActivity = (state: Binding, tracked: Tracked, record: Record<string, unknown> | undefined) => {
+    const session = object(record?.session)
+    if (!session) return
+    if (tracked.activity?.session !== session) {
+      tracked.activity?.unsubscribe?.()
+      const activity: NonNullable<Tracked['activity']> = { session, collector: new SubagentActivityCollector() }
+      tracked.activity = activity
+      if (typeof session.subscribe === 'function') {
+        try {
+          const unsubscribe: unknown = session.subscribe((event: unknown) => {
+            if (binding !== state || tracked.activity !== activity) return
+            activity.collector.observe(event)
+            syncActivity()
+            const ev = object(event)
+            const delta = object(ev?.assistantMessageEvent)
+            if (String(ev?.type ?? '').startsWith('tool_execution_') || delta?.type === 'text_delta') {
+              merge(tracked, { lastActivityAt: Date.now() })
+            }
+            persist(state, tracked)
+          })
+          if (typeof unsubscribe === 'function') activity.unsubscribe = unsubscribe as () => void
+        } catch {
+          // Message hydration still works when an SDK subscription is unavailable.
+        }
+      }
+    }
+    function syncActivity() {
+      const snapshot = tracked.activity!.collector.snapshot()
+      const signature = JSON.stringify(snapshot)
+      if (signature !== tracked.activitySignature) {
+        tracked.activitySignature = signature
+        // Empty text is an explicit reset on the wire; omitted keys preserve earlier snapshots.
+        merge(tracked, { ...snapshot, workingText: snapshot.workingText ?? '' })
+      }
+    }
+    // A just-created inherited session still contains parent history before its first prompt.
+    if (Array.isArray(session.messages) && (!isActive(tracked.agent.status) || session.isStreaming !== false)) {
+      tracked.activity.collector.hydrate(session.messages)
+    }
+    syncActivity()
+  }
   const tail = async (state: Binding, tracked: Tracked) => {
     const path = tracked.agent.outputFile
     if (typeof path !== 'string') return
@@ -160,6 +204,7 @@ export default function (pi: PiExtensionApi): void {
             tracked.agent.observedAt = Date.now()
           }
         }
+        captureActivity(state, tracked, record)
         const finalRead = tracked.needsFinal || !isActive(tracked.agent.status)
         await tail(state, tracked)
         if (binding !== state) return
@@ -168,6 +213,10 @@ export default function (pi: PiExtensionApi): void {
         const terminal = !isActive(tracked.agent.status)
         tracked.needsFinal = false
         persist(state, tracked, terminal)
+        if (terminal) {
+          tracked.activity?.unsubscribe?.()
+          if (tracked.activity) tracked.activity.unsubscribe = undefined
+        }
       }
     } finally {
       state.busy = false
@@ -188,6 +237,7 @@ export default function (pi: PiExtensionApi): void {
     const state = binding
     if (!state) return
     for (const tracked of state.agents.values()) {
+      tracked.activity?.unsubscribe?.()
       if (isActive(tracked.agent.status)) {
         merge(tracked, {
           status: 'interrupted',
@@ -243,20 +293,35 @@ export default function (pi: PiExtensionApi): void {
             record && typeof record.status === 'string' && !isActive(record.status) ? record.status : fallback
         }
         patch.status ??= tracked.agent.status
-        if (
+        const newRun =
           typeof patch.startedAt === 'number' &&
           typeof tracked.agent.startedAt === 'number' &&
           patch.startedAt > tracked.agent.startedAt &&
           typeof patch.status === 'string' &&
           isActive(patch.status)
-        ) {
-          for (const key of ['completedAt', 'durationMs', 'result', 'error']) delete tracked.agent[key]
+        if (newRun) {
+          for (const key of [
+            'completedAt',
+            'durationMs',
+            'result',
+            'error',
+            'prompt',
+            'activityTools',
+            'workingText',
+            'latestOutput',
+            'lastActivityAt'
+          ])
+            delete tracked.agent[key]
+          tracked.activity?.unsubscribe?.()
+          tracked.activity = undefined
+          tracked.activitySignature = undefined
           tracked.dirty = true
         }
         merge(tracked, patch)
+        captureActivity(state, tracked, record)
         if (record) tracked.agent.observedAt = Date.now()
         tracked.needsFinal = !isActive(tracked.agent.status)
-        persist(state, tracked, tracked.needsFinal)
+        persist(state, tracked, tracked.needsFinal || newRun)
         ensureTimer(state)
         if (tracked.needsFinal) void reconcile(state)
       }

@@ -1036,6 +1036,7 @@ export class PiAcpAgent implements ACPAgent {
         const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
         const isError = Boolean((m as any)?.isError)
         const isBash = isBashTool(toolName)
+        if (toolName === 'Agent' && session.hasTrackedSubagentInvocation(toolCallId, m)) continue
 
         if (isBash) {
           const text = bashResultText(m)

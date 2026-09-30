@@ -40,7 +40,6 @@ import {
   parseSubagentRecord,
   statusRank,
   subagentToolCall,
-  subagentOutputToolCall,
   toPlanEntries,
   type BridgeSubagent
 } from './subagent-plan.js'
@@ -329,7 +328,8 @@ export class PiAcpSession {
   private subagentFleet = new Map<string, BridgeSubagent>()
   private planState = newPlanState()
   private readonly subagentCards = new Set<string>()
-  private readonly subagentArtifactSignatures = new Map<string, string>()
+  private readonly hiddenAgentToolCalls = new Set<string>()
+  private readonly agentInputs = new Map<string, { prompt?: string; description?: string; type?: string }>()
   private readonly unsubscribe: Array<() => void> = []
   private closed = false
 
@@ -681,6 +681,8 @@ export class PiAcpSession {
     this.bashOutputSnapshots.delete(toolCallId)
     this.lastToolCallTitles.delete(toolCallId)
     this.compactSubagentToolCalls.delete(toolCallId)
+    this.hiddenAgentToolCalls.delete(toolCallId)
+    this.agentInputs.delete(toolCallId)
   }
 
   private startTurn(t: QueuedTurn): void {
@@ -762,6 +764,12 @@ export class PiAcpSession {
 
   private closeOpenTools(message: string): void {
     for (const toolCallId of [...this.currentToolCalls.keys()]) {
+      if (this.hiddenAgentToolCalls.has(toolCallId)) {
+        this.cleanupToolCall(toolCallId)
+        // A late SDK completion must not emit an update for a launch row we never created.
+        this.hiddenAgentToolCalls.add(toolCallId)
+        continue
+      }
       this.emit({
         sessionUpdate: 'tool_call_update',
         toolCallId,
@@ -773,21 +781,66 @@ export class PiAcpSession {
   }
 
   private publishSubagent(agent: BridgeSubagent): void {
+    const prompt = agent.toolCallId ? this.agentInputs.get(agent.toolCallId)?.prompt : undefined
+    if (prompt) {
+      agent = { ...agent, prompt }
+      this.subagentFleet.set(agent.id, agent)
+    }
     const call = subagentToolCall(agent)
     const exists = this.subagentCards.has(agent.id)
     this.subagentCards.add(agent.id)
     this.emit(exists ? { sessionUpdate: 'tool_call_update', ...call } : { sessionUpdate: 'tool_call', ...call })
-    const previous = this.subagentArtifactSignatures.get(agent.id)
-    const artifact = subagentOutputToolCall(agent, previous !== undefined)
-    if (artifact) {
-      const signature = JSON.stringify(artifact)
-      if (signature !== previous) {
-        this.subagentArtifactSignatures.set(agent.id, signature)
-        this.emit(
-          previous ? { sessionUpdate: 'tool_call_update', ...artifact } : { sessionUpdate: 'tool_call', ...artifact }
-        )
-      }
+  }
+
+  private trackAgentInvocation(toolCallId: string, args: unknown, status: 'pending' | 'in_progress'): void {
+    this.hiddenAgentToolCalls.add(toolCallId)
+    this.currentToolCalls.set(toolCallId, status)
+    const record = args !== null && typeof args === 'object' ? (args as Record<string, unknown>) : {}
+    const previous = this.agentInputs.get(toolCallId)
+    this.agentInputs.set(toolCallId, {
+      ...previous,
+      ...(typeof record.prompt === 'string' ? { prompt: record.prompt.slice(0, 2000) } : {}),
+      ...(typeof record.description === 'string' ? { description: record.description.slice(0, 160) } : {}),
+      ...(typeof record.subagent_type === 'string' ? { type: record.subagent_type.slice(0, 80) } : {})
+    })
+  }
+
+  hasTrackedSubagentInvocation(toolCallId: string, result: unknown): boolean {
+    const value = result !== null && typeof result === 'object' ? (result as Record<string, unknown>) : {}
+    const details =
+      value.details !== null && typeof value.details === 'object' ? (value.details as Record<string, unknown>) : {}
+    return (
+      (typeof details.agentId === 'string' && this.subagentFleet.has(details.agentId)) ||
+      [...this.subagentFleet.values()].some(agent => agent.toolCallId === toolCallId)
+    )
+  }
+
+  private completeAgentInvocation(toolCallId: string, result: unknown, isError: boolean): void {
+    const value = result !== null && typeof result === 'object' ? (result as Record<string, unknown>) : {}
+    const details =
+      value.details !== null && typeof value.details === 'object' ? (value.details as Record<string, unknown>) : {}
+    const id = typeof details.agentId === 'string' ? details.agentId : undefined
+    const agent = id
+      ? this.subagentFleet.get(id)
+      : [...this.subagentFleet.values()].find(a => a.toolCallId === toolCallId)
+    const input = this.agentInputs.get(toolCallId)
+    if (agent) {
+      const enriched = { ...agent, ...(input?.prompt ? { prompt: input.prompt } : {}), toolCallId }
+      this.subagentFleet.set(agent.id, enriched)
+      this.publishSubagent(enriched)
+    } else {
+      // Validation/startup errors and scheduled jobs have no child execution card.
+      this.emit({
+        sessionUpdate: 'tool_call',
+        toolCallId,
+        title: input?.description ?? 'Agent',
+        kind: 'other',
+        status: isError ? 'failed' : 'completed',
+        rawInput: input?.prompt ?? null,
+        content: [{ type: 'content', content: { type: 'text', text: compactSubagentText(toolResultToText(result)) } }]
+      })
     }
+    this.cleanupToolCall(toolCallId)
   }
 
   private interruptSubagents(error: string): void {
@@ -915,6 +968,10 @@ export class PiAcpSession {
                     }
                   })()
 
+            if (toolName === 'Agent') {
+              this.trackAgentInvocation(toolCallId, rawInput, this.currentToolCalls.get(toolCallId) ?? 'pending')
+              break
+            }
             if (isSubagentInvocationTool(toolName)) this.compactSubagentToolCalls.add(toolCallId)
             const displayInput = subagentDisplayInput(toolName, rawInput)
             const locations = toToolCallLocations(rawInput, this.cwd)
@@ -972,6 +1029,10 @@ export class PiAcpSession {
         const toolCallId = String((ev as any).toolCallId ?? crypto.randomUUID())
         const toolName = String((ev as any).toolName ?? 'tool')
         const args = (ev as any).args
+        if (toolName === 'Agent') {
+          this.trackAgentInvocation(toolCallId, args, 'in_progress')
+          break
+        }
         if (isSubagentInvocationTool(toolName)) this.compactSubagentToolCalls.add(toolCallId)
         let line: number | undefined
 
@@ -1052,6 +1113,7 @@ export class PiAcpSession {
         if (!toolCallId) break
 
         const partial = (ev as any).partialResult
+        if (this.hiddenAgentToolCalls.has(toolCallId)) break
         if (this.bashToolCallIds.has(toolCallId)) {
           this.emitBashOutputUpdate({ toolCallId, status: 'in_progress', result: partial })
           break
@@ -1079,6 +1141,10 @@ export class PiAcpSession {
 
         const result = (ev as any).result
         const isError = Boolean((ev as any).isError)
+        if (this.hiddenAgentToolCalls.has(toolCallId)) {
+          this.completeAgentInvocation(toolCallId, result, isError)
+          break
+        }
         if (this.bashToolCallIds.has(toolCallId)) {
           this.emitBashOutputUpdate({
             toolCallId,

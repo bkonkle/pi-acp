@@ -24,6 +24,6 @@ export function compactSubagentText(text: string): string {
     .slice(0, 800)
     .replace(/[\uD800-\uDBFF]$/, '')
   return preview.length < trimmed.length
-    ? `${preview}\n\nPreview only. Pi retains the full result; use the Full output file row when transcripts are enabled.`
+    ? `${preview}\n\nPreview only. Pi retains the full result; use the execution card’s full log link when transcripts are enabled.`
     : trimmed
 }

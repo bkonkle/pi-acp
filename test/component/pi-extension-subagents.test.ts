@@ -210,9 +210,15 @@ test('dirty snapshots wait 2s, genuine resume preserves startedAt, and terminal 
   await tick(t, 1000)
   assert.equal(h.agents('a').at(-1)?.toolUses, 2)
   assert.equal(h.agents('a').length, 2)
-  h.bus.emit('subagents:completed', { id: 'a', result: 'é'.repeat(40000), error: 'x'.repeat(40000) })
+  h.bus.emit('subagents:completed', {
+    id: 'a',
+    result: 'FINAL RESPONSE HEADER\n' + 'é'.repeat(40000),
+    error: 'x'.repeat(40000)
+  })
   assert.equal(h.agents('a').at(-1)?.status, 'completed', 'terminal event wins over a stale running registry')
   assert.ok(Buffer.byteLength(String(h.agents('a').at(-1)?.result)) <= 32768)
+  assert.match(String(h.agents('a').at(-1)?.result), /^FINAL RESPONSE HEADER/)
+  assert.ok(!String(h.agents('a').at(-1)?.result).includes('�'), 'UTF-8 clipping does not split a character')
   assert.ok(Buffer.byteLength(String(h.agents('a').at(-1)?.error)) <= 32768)
   await Promise.resolve()
   await Promise.resolve()
@@ -259,6 +265,116 @@ test('silent queued abort, turn-limit completion, and missing registry settle wi
   const count = h.entries.length
   await tick(t, 10000)
   assert.equal(h.entries.length, count, 'all settled; timer stopped')
+})
+
+test('structured child activity streams across RPC, deduplicates hydration, resets on resume, and detaches on shutdown', async t => {
+  const previous = globals[managerKey]
+  t.after(() => {
+    globals[managerKey] = previous
+  })
+  t.mock.timers.enable({ apis: ['Date', 'setInterval'], now: 1000 })
+  const events = new EventEmitter()
+  const sdk = {
+    isStreaming: false,
+    messages: [
+      { role: 'user', content: 'Inherited root task' },
+      {
+        role: 'assistant',
+        content: [{ type: 'toolCall', id: 'parent', name: 'read', arguments: { path: 'parent.ts' } }]
+      }
+    ] as unknown[],
+    subscribe(handler: (event: unknown) => void) {
+      events.on('event', handler)
+      return () => {
+        events.off('event', handler)
+      }
+    }
+  }
+  const records = new Map([['a', running('a', { session: sdk })]])
+  registry(records)
+  const h = harness()
+  t.after(() => h.shutdown())
+  await h.start()
+  h.bus.emit('subagents:started', { id: 'a' })
+  assert.equal(
+    h.agents('a').at(-1)?.prompt,
+    undefined,
+    'do not snapshot inherited parent context before the child prompt'
+  )
+  assert.deepEqual(h.agents('a').at(-1)?.activityTools, [])
+  sdk.messages.push({ role: 'user', content: 'Check authorization' })
+  sdk.isStreaming = true
+  events.emit('event', { type: 'message_start', message: { role: 'user', content: 'Check authorization' } })
+  events.emit('event', {
+    type: 'tool_execution_start',
+    toolCallId: 'read',
+    toolName: 'read',
+    args: { path: 'src/auth.ts' }
+  })
+  events.emit('event', {
+    type: 'tool_execution_end',
+    toolCallId: 'read',
+    toolName: 'read',
+    result: { content: [{ type: 'text', text: 'Missing permission check' }] }
+  })
+  sdk.messages.push(
+    {
+      role: 'assistant',
+      content: [{ type: 'toolCall', id: 'read', name: 'read', arguments: { path: 'src/auth.ts' } }]
+    },
+    {
+      role: 'toolResult',
+      toolCallId: 'read',
+      toolName: 'read',
+      content: [{ type: 'text', text: 'Missing permission check' }]
+    }
+  )
+  records.get('a')!.toolUses = 1
+  await tick(t, 2000)
+  const snapshot = h.agents('a').at(-1)!
+  assert.equal(snapshot.prompt, 'Check authorization')
+  const tools = snapshot.activityTools as { title: string; status: string; output: string }[]
+  assert.equal(tools.length, 1, 'event and history hydration describe the same call')
+  assert.match(tools[0].title, /src\/auth.ts/)
+  assert.equal(tools[0].status, 'completed')
+  assert.match(tools[0].output, /Missing permission check/)
+  assert.equal(events.listenerCount('event'), 1)
+  sdk.isStreaming = false
+  records.set('a', running('a', { session: sdk, startedAt: 5000 }))
+  h.bus.emit('subagents:started', { id: 'a' })
+  assert.equal(h.agents('a').at(-1)?.prompt, undefined, 'resume cannot present the previous task as new work')
+  sdk.messages.push({ role: 'user', content: 'Check the repaired permissions' })
+  sdk.isStreaming = true
+  events.emit('event', { type: 'message_start', message: { role: 'user', content: 'Check the repaired permissions' } })
+  await tick(t, 2000)
+  assert.equal(events.listenerCount('event'), 1, 'resume replaces rather than duplicates the subscription')
+  assert.deepEqual(h.agents('a').at(-1)?.activityTools, [])
+  assert.equal(h.agents('a').at(-1)?.prompt, 'Check the repaired permissions')
+  events.emit('event', { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'OLD RESPONSE' } })
+  await tick(t, 2000)
+  assert.equal(h.agents('a').at(-1)?.workingText, 'OLD RESPONSE')
+  events.emit('event', { type: 'message_start', message: { role: 'assistant', content: [] } })
+  records.set(
+    'a',
+    running('a', { session: sdk, startedAt: 5000, status: 'error', error: 'New response failed', completedAt: 8000 })
+  )
+  h.bus.emit('subagents:failed', { id: 'a' })
+  assert.equal(
+    h.agents('a').at(-1)?.workingText,
+    '',
+    'send an explicit clear rather than omit a field that preserves old text'
+  )
+  assert.ok(!JSON.stringify(h.agents('a').at(-1)).includes('OLD RESPONSE'))
+  await h.shutdown()
+  assert.equal(events.listenerCount('event'), 0)
+  const count = h.entries.length
+  events.emit('event', {
+    type: 'tool_execution_start',
+    toolCallId: 'late',
+    toolName: 'bash',
+    args: { command: 'false' }
+  })
+  assert.equal(h.entries.length, count)
 })
 
 test('bounded live/final file previews throttle dirty snapshots; heartbeat observes registry, not activity', async t => {

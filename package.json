@@ -38,8 +38,7 @@
   },
   "files": [
     "dist",
-    "src/pi-extension.ts",
-    "src/extensions"
+    "src"
   ],
   "pi": {
     "extensions": [
@@ -57,6 +56,7 @@
     "test": "node --import tsx --test test/**/*.test.ts",
     "smoke": "node scripts/smoke-acp.mjs",
     "smoke:tracking": "npm run build && node scripts/smoke-tracking.mjs",
+    "smoke:package": "npm run build && node scripts/smoke-package.mjs",
     "prepare": "node -e \"try{require.resolve('tsup')}catch(e){process.exit(0)};require('child_process').execSync('npm run build',{stdio:'inherit'})\"",
     "prepublishOnly": "npm run test && npm run build"
   },

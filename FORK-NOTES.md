@@ -1,9 +1,34 @@
 Fork of georgeharker/pi-acp. Local patches:
 
-## Native Zed subagent status rows
+## Expandable ACP subagent cards (stock Zed)
+
+The header-only approach below matched Zed's native status styling but could not expand without
+an internal child thread. It also left redundant launch/file rows. We now use one standard ACP
+card per child with task instructions as Markdown input, recent child tools and output snippets,
+a readable final result, and short log links. No Zed patch or fictitious child session is needed.
+Zed's standard input/output labels remain; native maximize/navigation is not available.
+
+The bridge subscribes to the public child SDK session and hydrates missed message history.
+Activity is bounded to eight tools, with 320-character/four-line output snippets; task prompts and
+final responses have separate limits. Parent history inherited before the child's first prompt
+is not shown as child activity. Resume clears old activity/errors and replaces the subscription.
+Successful `Agent` invocation rows are suppressed in live events and history replay. Startup errors
+still render normally; a background launch acknowledgement cannot complete its execution card,
+and parent cancellation cannot emit updates for a launch row that was never created.
+
+Regression tests cover streaming/hydration, ownership, cancellation, resume, startup failures,
+large results, replay deduplication, and retained full model results. The RPC smoke checks real
+bridge packets containing command/output activity, compact log links, and a silent abort.
+
+Review regressions: response resets cross RPC as an explicit empty string, so a text-free failed
+reply cannot keep an earlier response visible. The npm artifact includes the source helpers
+required by its advertised extension entry points. Tests import those entry points from an actual
+packed tarball; `smoke:package` additionally loads them using the real Pi resource loader.
+
+## Native Zed subagent status rows (superseded by expandable cards)
 
 The previous synthetic cards embedded up to 32,000 characters of transcript on every update.
-They were noisy and still truncated. `subagentToolCall` now uses `_meta.tool_name: "spawn_agent"`,
+They were noisy and still truncated. Commit `7410970` used `_meta.tool_name: "spawn_agent"`,
 which Zed 1.21.0 recognizes in `ToolCall::is_subagent()` and routes to `render_subagent_card()`.
 Zed supplies its own spinner/checkmark/error visuals; the adapter keeps the existing execution
 lifecycle, interruption detection, and active-branch restoration.

@@ -2,7 +2,7 @@ import { defineConfig } from 'tsup'
 
 // The bundled pi extensions (src/extensions/*.ts + src/pi-extension.ts) are built as separate
 // entries so the adapter can load them into spawned `pi` processes via `-e <path>` (see
-// src/pi-rpc/process.ts). They must stay dependency-free (type-only imports only).
+// src/pi-rpc/process.ts). Keep external runtime dependencies out; owned helpers are bundled.
 export default defineConfig({
   entry: ['src/index.ts', 'src/pi-extension.ts', 'src/extensions/todo-acp.ts'],
   format: ['esm'],

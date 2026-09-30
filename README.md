@@ -222,23 +222,30 @@ Extension commands can be invoked by typing their slash command, but are not adv
 pi itself emits no ACP plans, so the ACP `plan` (task-list) channel is unused. When you use the
 [pi-subagents](https://github.com/tintinweb/pi-subagents) extension, pi-acp can surface the running
 subagent fleet as an ACP plan — each subagent becomes a task with `pending` / `in_progress` /
-`completed` status. Each also gets a compact execution row. In Zed 1.21.0, `_meta.tool_name:
-"spawn_agent"` selects Zed's native subagent header: its spinner while queued/running, a checkmark
-on completion, and an error icon on failure. Titles carry the task, elapsed time, and tool count;
-status observations and output-activity timestamps remain structured metadata, not transcript text.
-Background `Agent` calls can return an id while their execution rows continue updating.
+`completed` status. Each also gets **one expandable standard ACP tool card**, usable in stock Zed.
+Its title shows the task, execution state, tool count, and elapsed time. Expand it to read the task
+instructions, recent tool calls with commands/paths and short output previews, and a Markdown
+**Subagent Output** section. Existing logs appear as short named links inside the same card;
+the primary file also has a Go to File action. There is no separate successful launch or file-output row.
 
-A small **Full output** companion row links to the existing output/session files; its Go to File
-action opens the primary file in the editor. It is a file reference, not another running agent.
-No transcript is embedded in the status row. `Agent` and `get_subagent_result` tool displays,
-including replayed history, use previews capped at eight lines / 800 characters and omit raw-output
-copies that would bypass that limit. Full tool results delivered to Pi are unchanged. If transcripts
-are disabled, no new recording is created; failure details still get a compact readable row.
+The bridge observes the child's SDK session directly: tool start/end events update the activity,
+while message hydration fills in missed history without duplicating calls or reopening finished ones.
+Cards show up to eight recent tools (320 characters / four lines of output per tool), a 2,000-character
+task prompt, and up to 5,000 characters of final response. Raw JSONL transcript tails and result-detail
+objects are never dumped into the card. Full results delivered to Pi are unchanged. Result-retrieval
+and untracked invocation previews remain capped at eight lines / 800 characters, including replay.
+Startup/validation errors with no child execution still get a visible invocation row.
 
-This does **not** implement Zed's expandable child-thread preview or full-screen child navigation.
-Those require a child thread registered inside Zed, which external ACP tool notifications do not
-currently provide. We deliberately do not advertise a fictitious child session. Other ACP clients
-ignore the Zed metadata and receive the same compact status and file rows.
+Background `Agent` calls can return an id while their execution cards continue updating; cancellation
+of the parent prompt alone does not finish a child. Reloaded history restores card activity/results
+without replaying a redundant successful launch. If upstream transcripts are disabled, no new output
+file is created; bounded card data remains in the existing ACP session-tracking entries.
+
+This is intentionally **not** Zed's native child-thread renderer. The `spawn_agent` metadata selects
+a header with no usable expansion unless a child conversation is registered inside Zed. Standard ACP
+cards provide the working disclosure arrow and Markdown details instead; Zed retains its standard
+input/output labels. Native child-thread navigation/maximize is unavailable without changes to Zed,
+and no fictitious child session is advertised.
 
 Because pi's RPC mode does not forward pi's in-process event bus (`subagents:*`), the bridging is
 done by a pi extension. The `pi-acp` package doubles as that extension (`src/pi-extension.ts`,
@@ -264,10 +271,11 @@ ACP `PlanEntryStatus` has no failed state, so the checklist annotates failed, ab
 and interrupted tasks; their tool cards use ACP's `failed` status. The bridge reconciles known
 top-level agents through pi-subagents' public registry every second, catching silent queued
 cancellation and turn-limit completion. It persists changed previews at most every two seconds
-and status observations every ten seconds; those observations are not proof of output progress.
+and status observations every ten seconds; those observations are not proof of progress. Actual
+child tool/text events and output-file changes carry activity timestamps separately.
 
 Process death, session replacement, and shutdown close unfinished cards as interrupted. Resume
-restores active-branch tracking records and output-file links, but never claims an old process's agents
+restores active-branch tracking records, bounded activity, final output, and log links, but never claims an old process's agents
 are still running. Detached agents can continue after the parent prompt is cancelled; cancelling
 the prompt alone does not claim to have stopped them. Extension listeners/timers are released on
 shutdown and rebound on reload. The upstream lifecycle bus excludes workflow-owned and nested
@@ -373,7 +381,9 @@ machine. Written so an agent can execute it; only the auth steps need a human.
    `title`. Then open a pi-acp thread in Zed and check that the thread title changes from
    "New Agent Thread" after the first reply. `npm run smoke:tracking` exercises real Pi RPC with
    an offline execution fixture (no model call), checking external plans, immediate command
-   completion, live output cards/file links, and silent cancellation.
+   completion, expandable cards with tool activity/log links, and silent cancellation.
+   `npm run smoke:package` also packs the npm artifact and loads its advertised extensions through
+   the real Pi resource loader (requires the Pi SDK installed locally or globally).
 
 ## Authentication (ACP Registry support)
 
@@ -395,6 +405,8 @@ npm run dev        # run from src via tsx
 npm run build
 npm run lint
 npm run test
+npm run smoke:tracking  # offline fixture through real Pi RPC
+npm run smoke:package   # packed artifact through the real Pi SDK loader
 ```
 
 Project layout:

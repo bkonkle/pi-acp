@@ -1,4 +1,5 @@
-import type { PlanEntry, ToolCall, ToolCallContent } from '@agentclientprotocol/sdk'
+import type { PlanEntry, ToolCall } from '@agentclientprotocol/sdk'
+import type { SubagentToolActivity } from '../subagent-activity.js'
 import { isAbsolute } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -48,6 +49,9 @@ export type BridgeSubagent = {
   latestOutput?: string
   outputFile?: string
   sessionFile?: string
+  prompt?: string
+  activityTools?: SubagentToolActivity[]
+  workingText?: string
 }
 
 export type SubagentEntry = { clear: true } | { agent: BridgeSubagent }
@@ -123,6 +127,25 @@ function parseDetails(data: object): Partial<BridgeSubagent> {
       details[key] = value
     }
   }
+  if (typeof rec.prompt === 'string') details.prompt = rec.prompt.slice(0, 2000)
+  if (typeof rec.workingText === 'string') details.workingText = rec.workingText.slice(0, 1200)
+  if (Array.isArray(rec.activityTools)) {
+    details.activityTools = rec.activityTools.slice(-8).flatMap((value: unknown) => {
+      if (value === null || typeof value !== 'object') return []
+      const tool = value as Record<string, unknown>
+      if (typeof tool.id !== 'string' || typeof tool.name !== 'string' || typeof tool.title !== 'string') return []
+      if (!['running', 'completed', 'failed'].includes(String(tool.status))) return []
+      return [
+        {
+          id: tool.id.slice(0, 256),
+          name: tool.name.slice(0, 80),
+          title: tool.title.slice(0, 160),
+          status: tool.status as SubagentToolActivity['status'],
+          ...(typeof tool.output === 'string' ? { output: tool.output.slice(0, 320) } : {})
+        }
+      ]
+    })
+  }
   return details
 }
 
@@ -175,7 +198,13 @@ export function mergeSubagent(prev: BridgeSubagent | undefined, incoming: Bridge
     delete merged.completedAt
     delete merged.durationMs
     delete merged.latestOutput
-    if (incoming.latestOutput !== undefined) merged.latestOutput = incoming.latestOutput
+    delete merged.prompt
+    delete merged.activityTools
+    delete merged.workingText
+    delete merged.lastActivityAt
+    for (const key of ['latestOutput', 'prompt', 'activityTools', 'workingText', 'lastActivityAt'] as const) {
+      if (incoming[key] !== undefined) Object.assign(merged, { [key]: incoming[key] })
+    }
   }
   if (prev && !newRun) {
     const prevStatus = String(prev.status ?? '').toLowerCase()
@@ -248,7 +277,16 @@ function agentLabel(agent: BridgeSubagent): string {
   return label.length > 100 ? label.slice(0, 99) + '…' : label
 }
 
-/** Zed recognizes this metadata and supplies its native spinner/checkmark subagent header. */
+function excerpt(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max).replace(/[\uD800-\uDBFF]$/, '') + '\n\n… Preview shortened.' : text
+}
+
+function codeBlock(text: string): string {
+  const fence = '`'.repeat(Math.max(3, ...Array.from(text.matchAll(/`+/g), match => match[0].length + 1)))
+  return `${fence}\n${text}\n${fence}`
+}
+
+/** Standard ACP cards expand in stock Zed; native spawn_agent headers require a registered child. */
 export function subagentToolCall(agent: BridgeSubagent): ToolCall {
   const rawStatus = String(agent.status ?? 'queued').toLowerCase()
   const terminal = statusRank(rawStatus) === 2
@@ -264,58 +302,68 @@ export function subagentToolCall(agent: BridgeSubagent): ToolCall {
   const end = agent.completedAt ?? agent.observedAt
   const duration =
     agent.durationMs ?? (end != null && agent.startedAt != null ? Math.max(0, end - agent.startedAt) : undefined)
-  if (agent.toolUses != null) stats.push(`${agent.toolUses} tools`)
+  if (agent.toolUses != null) stats.push(`${agent.toolUses} tool${agent.toolUses === 1 ? '' : 's'}`)
   if (duration != null) stats.push(`${Math.floor(duration / 1000)}s`)
   const title = [agentLabel(agent), ...(state === 'running' || state === 'completed' ? [] : [state]), ...stats].join(
     ' · '
   )
-  // Zed does not render tool content inside a native header without a registered child thread.
-  // Keep this useful for other ACP clients, but never copy the transcript into the parent row.
-  const text = [state, agent.error?.slice(0, 500)].filter(Boolean).join(': ')
-  return {
-    toolCallId: `pi-subagent-${agent.id}`,
-    title,
-    kind: 'other',
-    status,
-    content: [{ type: 'content', content: { type: 'text', text } }],
-    rawOutput: {
-      agentId: agent.id,
-      status: rawStatus,
-      startedAt: agent.startedAt,
-      completedAt: agent.completedAt,
-      observedAt: agent.observedAt,
-      lastActivityAt: agent.lastActivityAt
-    },
-    _meta: { tool_name: 'spawn_agent', piAcp: { subagentId: agent.id } }
+  const lines: string[] = []
+  const tools = agent.activityTools ?? []
+  if (tools.length) {
+    lines.push('### Tool activity')
+    if ((agent.toolUses ?? 0) > tools.length) lines.push(`Showing the ${tools.length} most recent calls.`)
+    for (const tool of tools) {
+      const icon = tool.status === 'completed' ? '✓' : tool.status === 'failed' ? '✕' : '◌'
+      lines.push(`${icon} **${tool.name.replace(/[\\*_`<>]/g, '')}**\n\n${codeBlock(tool.title)}`)
+      if (tool.output) lines.push(codeBlock(tool.output))
+    }
+  } else if (!terminal) {
+    lines.push(state === 'queued' ? 'Waiting for an execution slot.' : 'Waiting for child activity.')
   }
-}
-
-/** A separate file row remains clickable even though Zed cannot preview an external child thread. */
-export function subagentOutputToolCall(agent: BridgeSubagent, keepRow = false): ToolCall | null {
+  if (!terminal && agent.workingText) lines.push('### Latest response', excerpt(agent.workingText, 1200))
+  if (agent.error) lines.push('### Error', excerpt(agent.error, 1500))
+  if (terminal)
+    lines.push(
+      '---',
+      '### ↳ Subagent Output',
+      excerpt(
+        agent.result ||
+          (agent.workingText
+            ? '_Final result unavailable; last recorded response:_\n\n' + agent.workingText
+            : 'No final response recorded.'),
+        5000
+      )
+    )
   const paths = [
     ...new Set([agent.outputFile, agent.sessionFile].filter((p): p is string => typeof p === 'string' && isAbsolute(p)))
   ]
-  // Clear a previous run's error row when a resumed execution has no transcript.
-  if (!paths.length && !agent.error && !keepRow) return null
-  const content: ToolCallContent[] = paths.map(path => ({
-    type: 'content',
-    content: {
-      type: 'resource_link',
-      uri: pathToFileURL(path).href,
-      name: path === agent.outputFile ? 'Full subagent output' : 'Subagent session transcript'
-    }
-  }))
-  if (agent.error) content.unshift({ type: 'content', content: { type: 'text', text: agent.error.slice(0, 500) } })
-  if (!content.length)
-    content.push({ type: 'content', content: { type: 'text', text: 'No transcript file is available.' } })
+  if (paths.length) {
+    lines.push(
+      '---',
+      paths
+        .map(
+          path => `[${path === agent.outputFile ? 'Full log' : 'Session transcript'}](<${pathToFileURL(path).href}>)`
+        )
+        .join(' · ')
+    )
+  }
   return {
-    toolCallId: `pi-agent-output-${agent.id}`,
-    title: `${paths.length ? 'Full output' : agent.error ? 'Error details' : 'Output unavailable'}: ${agentLabel(agent)}`,
-    kind: paths.length ? 'read' : 'other',
-    status: 'completed',
-    content,
-    // One primary location gives Zed a Go to File action in the collapsed row.
+    toolCallId: `pi-subagent-${agent.id}`,
+    title: `${status === 'completed' ? '✓ ' : status === 'failed' ? '✕ ' : ''}${title}${state === 'running' ? ' · running' : ''}`,
+    kind: 'other',
+    status,
+    // A string renders as Markdown rather than a JSON argument dump in Zed.
+    rawInput: agent.prompt ? codeBlock(agent.prompt) : agentLabel(agent),
+    content: [{ type: 'content', content: { type: 'text', text: lines.join('\n\n') } }],
     locations: paths.length ? [{ path: paths[0]! }] : [],
-    _meta: { piAcp: { subagentId: agent.id, artifact: true } }
+    _meta: {
+      tool_name: 'Agent',
+      piAcp: {
+        subagentId: agent.id,
+        status: rawStatus,
+        observedAt: agent.observedAt,
+        lastActivityAt: agent.lastActivityAt
+      }
+    }
   }
 }
