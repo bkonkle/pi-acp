@@ -75,7 +75,9 @@ test('parseSubagentRecord: final record with result + duration from timestamps',
     status: 'completed',
     result: 'found 3 files',
     error: undefined,
-    durationMs: 3200
+    durationMs: 3200,
+    startedAt: 1000,
+    completedAt: 4200
   })
 })
 

@@ -37,6 +37,8 @@ import {
   mergeSubagent,
   parseSubagentEntry,
   parseSubagentRecord,
+  statusRank,
+  subagentToolCall,
   toPlanEntries,
   type BridgeSubagent
 } from './subagent-plan.js'
@@ -48,6 +50,7 @@ import {
   toPlanEntries as toCribPlanEntries
 } from './plan-bridge.js'
 import { toolCallTitle } from './tool-title.js'
+import { readTrackingHistory } from './tracking-history.js'
 
 type SessionCreateParams = {
   cwd: string
@@ -72,6 +75,8 @@ export type StopReason = 'end_turn' | 'cancelled' | 'error'
 type PendingTurn = {
   resolve: (reason: StopReason) => void
   reject: (err: unknown) => void
+  started: boolean
+  settling: boolean
 }
 
 type QueuedTurn = {
@@ -199,6 +204,7 @@ export class SessionManager {
   close(sessionId: string): void {
     const s = this.sessions.get(sessionId)
     if (!s) return
+    s.dispose()
     try {
       s.proc.dispose?.()
     } catch {
@@ -320,6 +326,9 @@ export class PiAcpSession {
   // Accumulated pi-subagents fleet (from `acp:subagents` custom entries), keyed by agent id.
   private subagentFleet = new Map<string, BridgeSubagent>()
   private planState = newPlanState()
+  private readonly subagentCards = new Set<string>()
+  private readonly unsubscribe: Array<() => void> = []
+  private closed = false
 
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
@@ -369,8 +378,8 @@ export class PiAcpSession {
     this.fileCommands = opts.fileCommands ?? []
     this.clientCapabilities = opts.clientCapabilities
 
-    this.proc.onEvent(ev => this.handlePiEvent(ev))
-    this.proc.onExit(() => this.handleProcExit())
+    this.unsubscribe.push(this.proc.onEvent(ev => this.handlePiEvent(ev)))
+    this.unsubscribe.push(this.proc.onExit(() => this.handleProcExit()))
   }
 
   /**
@@ -378,6 +387,11 @@ export class PiAcpSession {
    * `agent_settled`, so settle them now instead of leaving the ACP `session/prompt` request hanging.
    */
   private handleProcExit(): void {
+    if (this.closed) return
+    this.closed = true
+    for (const off of this.unsubscribe.splice(0)) off()
+    this.closeOpenTools('Pi process exited before the tool finished.')
+    this.interruptSubagents('Pi process exited; this subagent is no longer running in the attached process.')
     const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
     const pending = this.pendingTurn
     const queued = this.turnQueue.splice(0, this.turnQueue.length)
@@ -390,7 +404,13 @@ export class PiAcpSession {
     })
   }
 
+  /** Detach a replaced session before its old process can publish more updates. */
+  dispose(): void {
+    this.handleProcExit()
+  }
+
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
+    if (this.closed) return 'error'
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
@@ -663,7 +683,8 @@ export class PiAcpSession {
     this.currentMessageId = null
     this.surfacedErrorKeys.clear()
 
-    this.pendingTurn = { resolve: t.resolve, reject: t.reject }
+    const pending: PendingTurn = { resolve: t.resolve, reject: t.reject, started: false, settling: false }
+    this.pendingTurn = pending
 
     // Publish queue depth (0 because we're starting the turn now).
     this.emit({
@@ -674,30 +695,150 @@ export class PiAcpSession {
     // Kick off pi, but completion is determined by pi events, not the RPC response.
     // The prompt RPC only acknowledges acceptance; retry, compaction, or queued
     // continuations may emit multiple `agent_end` events before `agent_settled`.
-    this.proc.prompt(t.message, t.images).catch(err => {
-      // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
-      // Also ensure we flush any already-enqueued updates first.
-      void this.flushEmits().finally(() => {
-        // If this looks like an auth/config issue, surface AUTH_REQUIRED so clients can offer terminal login.
-        const authErr = maybeAuthRequiredError(err)
-        if (authErr) {
-          this.pendingTurn?.reject(authErr)
-        } else {
-          const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
-          this.pendingTurn?.resolve(reason)
+    void this.proc
+      .prompt(t.message, t.images)
+      .then(async () => {
+        // Extension commands and handled inputs succeed without starting a model run, so pi emits
+        // no agent_settled. Probe only after acceptance, and never guess idle from missing fields.
+        if (this.pendingTurn !== pending || pending.started || pending.settling) return
+        let state: unknown
+        try {
+          state = await this.proc.getState()
+        } catch {
+          return
         }
-
+        if (this.pendingTurn !== pending || pending.started || pending.settling) return
+        const s = state as { isStreaming?: unknown; isCompacting?: unknown; pendingMessageCount?: unknown } | null
+        if (s?.isStreaming === false && s.isCompacting !== true && s.pendingMessageCount === 0) {
+          await this.finishTurn(pending, this.cancelRequested ? 'cancelled' : 'end_turn', false)
+        }
+      })
+      .catch(err => {
+        if (this.pendingTurn !== pending) return
+        this.closeOpenTools('Pi rejected the prompt before the tool finished.')
+        const reason: StopReason = this.cancelRequested ? 'cancelled' : 'error'
+        const queued = this.turnQueue.splice(0)
         this.pendingTurn = null
-
-        // If the prompt failed, do not automatically proceed—pi may be unhealthy.
-        // But we still clear the queueDepth metadata.
-        this.emit({
-          sessionUpdate: 'session_info_update',
-          _meta: { piAcp: { queueDepth: this.turnQueue.length, running: false } }
+        this.emit({ sessionUpdate: 'session_info_update', _meta: { piAcp: { queueDepth: 0, running: false } } })
+        void this.flushEmits().finally(() => {
+          const authErr = maybeAuthRequiredError(err)
+          if (authErr) pending.reject(authErr)
+          else pending.resolve(reason)
+          for (const turn of queued) turn.resolve(reason)
         })
       })
-      void err
+  }
+
+  private async finishTurn(pending: PendingTurn, reason: StopReason, usage: boolean): Promise<void> {
+    if (this.pendingTurn !== pending || pending.settling) return
+    pending.settling = true
+    this.closeOpenTools(
+      reason === 'cancelled' ? 'Tool interrupted by cancellation.' : 'Pi settled before the tool reported completion.'
+    )
+    await this.flushEmits()
+    if (usage) await this.collectUsageUpdate()
+    await this.flushEmits()
+    if (this.pendingTurn !== pending) return
+    this.pendingTurn = null
+    pending.resolve(reason)
+    const next = this.turnQueue.shift()
+    if (next) {
+      this.currentMessageId = null
+      this.emit({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` },
+        messageId: this.nextMessageId()
+      })
+      this.startTurn(next)
+    } else {
+      this.emit({ sessionUpdate: 'session_info_update', _meta: { piAcp: { queueDepth: 0, running: false } } })
+    }
+  }
+
+  private closeOpenTools(message: string): void {
+    for (const toolCallId of [...this.currentToolCalls.keys()]) {
+      this.emit({
+        sessionUpdate: 'tool_call_update',
+        toolCallId,
+        status: 'failed',
+        content: [{ type: 'content', content: { type: 'text', text: message } }]
+      })
+      this.cleanupToolCall(toolCallId)
+    }
+  }
+
+  private publishSubagent(agent: BridgeSubagent): void {
+    const call = subagentToolCall(agent)
+    const exists = this.subagentCards.has(agent.id)
+    this.subagentCards.add(agent.id)
+    this.emit(exists ? { sessionUpdate: 'tool_call_update', ...call } : { sessionUpdate: 'tool_call', ...call })
+  }
+
+  private interruptSubagents(error: string): void {
+    let changed = false
+    for (const [id, prev] of this.subagentFleet) {
+      if (statusRank(prev.status) === 2) continue
+      const agent: BridgeSubagent = { ...prev, status: 'interrupted', error, completedAt: Date.now() }
+      this.subagentFleet.set(id, agent)
+      this.publishSubagent(agent)
+      changed = true
+    }
+    if (changed) this.emitCombinedPlan()
+  }
+
+  private emitCombinedPlan(): void {
+    this.emit({
+      sessionUpdate: 'plan',
+      entries: [...toCribPlanEntries(this.planState), ...toPlanEntries(this.subagentFleet.values())]
     })
+  }
+
+  /** New subprocesses cannot inherit the old process's running subagents. */
+  async restoreTracking(sessionFile: string): Promise<void> {
+    try {
+      const historical = new Map<string, BridgeSubagent>()
+      const plan = newPlanState()
+      for (const entry of await readTrackingHistory(sessionFile)) {
+        if (entry.customType === SUBAGENT_PLAN_CUSTOM_TYPE) {
+          const parsed = parseSubagentEntry(entry.data)
+          if (parsed && 'clear' in parsed) historical.clear()
+          else if (parsed && 'agent' in parsed)
+            historical.set(parsed.agent.id, mergeSubagent(historical.get(parsed.agent.id), parsed.agent))
+        } else if (entry.customType === SUBAGENT_RECORD_CUSTOM_TYPE) {
+          const agent = parseSubagentRecord(entry.data)
+          if (agent) historical.set(agent.id, mergeSubagent(historical.get(agent.id), agent))
+        } else {
+          const op = parsePlanEntry(entry.data)
+          if (op) applyPlanEntry(plan, op)
+        }
+      }
+      if (this.closed) return
+      for (const [id, previous] of historical) {
+        if (this.subagentFleet.has(id)) continue
+        const agent: BridgeSubagent =
+          statusRank(previous.status) === 2
+            ? previous
+            : {
+                ...previous,
+                status: 'interrupted',
+                error: 'Previous Pi process is no longer attached. Resume this subagent explicitly to run it again.',
+                completedAt: previous.observedAt ?? Date.now()
+              }
+        this.subagentFleet.set(id, agent)
+        this.publishSubagent(agent)
+      }
+      for (const [ns, items] of plan.byNs) {
+        if (!this.planState.byNs.has(ns)) {
+          this.planState.byNs.set(ns, items)
+          const seq = plan.lastSeq.get(ns)
+          if (seq != null) this.planState.lastSeq.set(ns, seq)
+        }
+      }
+      this.emitCombinedPlan()
+      await this.flushEmits()
+    } catch {
+      // Missing or legacy session files do not prevent conversation restoration.
+    }
   }
 
   private handlePiEvent(ev: PiRpcEvent) {
@@ -1035,7 +1176,7 @@ export class PiAcpSession {
       }
 
       case 'agent_start': {
-        // No adapter state to update; ACP turn completion is driven by `agent_settled`.
+        if (this.pendingTurn) this.pendingTurn.started = true
         break
       }
 
@@ -1079,33 +1220,9 @@ export class PiAcpSession {
       }
 
       case 'agent_settled': {
-        // Ensure all updates derived from pi events are delivered before we resolve
-        // the ACP `session/prompt` request.
-        void this.flushEmits()
-          .then(() => this.collectUsageUpdate())
-          .then(() => this.flushEmits())
-          .finally(() => {
-            const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-            this.pendingTurn?.resolve(reason)
-            this.pendingTurn = null
-
-            // Start next queued prompt, if any.
-            const next = this.turnQueue.shift()
-            if (next) {
-              this.currentMessageId = null
-              this.emit({
-                sessionUpdate: 'agent_message_chunk',
-                content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` },
-                messageId: this.nextMessageId()
-              })
-              this.startTurn(next)
-            } else {
-              this.emit({
-                sessionUpdate: 'session_info_update',
-                _meta: { piAcp: { queueDepth: 0, running: false } }
-              })
-            }
-          })
+        const pending = this.pendingTurn
+        if (pending) void this.finishTurn(pending, this.cancelRequested ? 'cancelled' : 'end_turn', true)
+        else void this.collectUsageUpdate()
         break
       }
 
@@ -1170,17 +1287,21 @@ export class PiAcpSession {
       const parsed = parseSubagentEntry(e.data)
       if (!parsed) return
       if ('clear' in parsed) {
+        this.interruptSubagents('Subagent tracking reset; the previous execution is no longer attached.')
         this.subagentFleet.clear()
       } else {
-        // mergeSubagent is monotonic + field-preserving (pi can emit `started` before `created`).
-        this.subagentFleet.set(parsed.agent.id, mergeSubagent(this.subagentFleet.get(parsed.agent.id), parsed.agent))
+        const agent = mergeSubagent(this.subagentFleet.get(parsed.agent.id), parsed.agent)
+        this.subagentFleet.set(agent.id, agent)
+        this.publishSubagent(agent)
       }
       changed = true
     } else if (e.customType === SUBAGENT_RECORD_CUSTOM_TYPE) {
       const rec = parseSubagentRecord(e.data)
       if (!rec) return
       // Final record enriches the existing live entry (same monotonic + field-preserving merge).
-      this.subagentFleet.set(rec.id, mergeSubagent(this.subagentFleet.get(rec.id), rec))
+      const agent = mergeSubagent(this.subagentFleet.get(rec.id), rec)
+      this.subagentFleet.set(agent.id, agent)
+      this.publishSubagent(agent)
       changed = true
     } else if (e.customType === PLAN_CUSTOM_TYPE) {
       const op = parsePlanEntry(e.data)
@@ -1197,11 +1318,7 @@ export class PiAcpSession {
         const planCount = toCribPlanEntries(this.planState).length
         process.stderr.write(`[pi-acp] entry (${String(e.customType)}) -> plan:${planCount} fleet:[${fleet}]\n`)
       }
-      // One ACP plan surfaces both sources: the cribsheet plan first, then the live subagent fleet.
-      this.emit({
-        sessionUpdate: 'plan',
-        entries: [...toCribPlanEntries(this.planState), ...toPlanEntries(this.subagentFleet.values())]
-      })
+      this.emitCombinedPlan()
     }
   }
 

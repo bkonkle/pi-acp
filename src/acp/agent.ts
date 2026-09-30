@@ -253,7 +253,7 @@ export class PiAcpAgent implements ACPAgent {
       this.lastSessionCwd = cwd
       this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
 
-      // Seed the thread title from pi's persisted session name (best effort).
+      await session.restoreTracking?.(stored.sessionFile)
       // Optional call: tests sometimes stub session objects.
       void session.syncTitleFromState?.()
 

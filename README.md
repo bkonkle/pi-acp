@@ -215,14 +215,17 @@ Other built-in commands:
 
 - Skill commands can be enabled in pi settings and will appear in the slash command list in ACP client as `/skill:skill-name`.
 
-**Note**: Slash commands provided by pi extensions are not currently supported.
+Extension commands can be invoked by typing their slash command, but are not advertised in the command picker. Commands and intercepted inputs that finish without starting a model run no longer leave the ACP prompt pending. TUI-only dialogs such as `/agents` still cannot render in Zed.
 
 ## Subagents as tasks
 
 pi itself emits no ACP plans, so the ACP `plan` (task-list) channel is unused. When you use the
 [pi-subagents](https://github.com/tintinweb/pi-subagents) extension, pi-acp can surface the running
 subagent fleet as an ACP plan — each subagent becomes a task with `pending` / `in_progress` /
-`completed` status.
+`completed` status. Each also gets a separate expandable ACP tool card containing a live output
+preview, final result/error, elapsed time, observed status, last output activity, and clickable
+output/transcript file locations. Background `Agent` calls can finish returning an id while these
+execution cards continue updating.
 
 Because pi's RPC mode does not forward pi's in-process event bus (`subagents:*`), the bridging is
 done by a pi extension. The `pi-acp` package doubles as that extension (`src/pi-extension.ts`,
@@ -244,20 +247,31 @@ The adapter marks the pi process it spawns with `PI_ACP=1`, which activates the 
 there; the extension stays inert in a normal terminal `pi` session (no marker), so it has no effect
 outside the adapter.
 
-ACP `PlanEntryStatus` has no `failed` value, so a failed subagent is shown as `completed` with a
-`(failed)` annotation.
+ACP `PlanEntryStatus` has no failed state, so the checklist annotates failed, aborted, stopped,
+and interrupted tasks; their tool cards use ACP's `failed` status. The bridge reconciles known
+top-level agents through pi-subagents' public registry every second, catching silent queued
+cancellation and turn-limit completion. It persists changed previews at most every two seconds
+and status observations every ten seconds; those observations are not proof of output progress.
+
+Process death, session replacement, and shutdown close unfinished cards as interrupted. Resume
+restores active-branch tracking records and final output, but never claims an old process's agents
+are still running. Detached agents can continue after the parent prompt is cancelled; cancelling
+the prompt alone does not claim to have stopped them. Extension listeners/timers are released on
+shutdown and rebound on reload. The upstream lifecycle bus excludes workflow-owned and nested
+agents, so these cards cover top-level agents, not the TUI's full workflow conversation viewer.
 
 ## Bundled pi extensions
 
 This fork ships two pi extensions. They are built to `dist/extensions/*.js` and the adapter loads
 them into every spawned `pi` process via `-e` (see `src/pi-rpc/process.ts`) — so installing this
 package is the only setup step; no user-level extension files are needed. Each one is gated to
-RPC/`PI_ACP=1` mode (inert in a normal terminal `pi`) and guards against double loading (the
-package's `pi.extensions` key and the adapter's `-e` flag may both apply).
+RPC/`PI_ACP=1` mode (inert in a normal terminal `pi`). Runtime state is activation-local, so a
+reload registers fresh handlers rather than being blocked by a permanent process guard.
 
-### `todo-acp` — TODO.md as the Zed todo checklist
+### `todo-acp` — external session plans as the Zed todo checklist
 
-Track work in `TODO.md` at the project root using GitHub-style checkboxes:
+Track agent work in `~/.pi/agent/plans/<session-id>/TODO.md`, outside the workspace, using
+GitHub-style checkboxes:
 
 ```markdown
 - [ ] pending task
@@ -265,9 +279,16 @@ Track work in `TODO.md` at the project root using GitHub-style checkboxes:
 - [x] done task
 ```
 
-Whenever a tool writes `TODO.md`, the extension parses the checkboxes and appends an `acp:plan`
-custom entry; the adapter decodes it into an ACP `plan` update, which Zed renders as its native
-todo checklist. `TODO.md` stays the single source of truth — the panel is just a projection.
+The extension supplies the exact absolute plan path in the model's system prompt and mirrors
+only that file into Zed's checklist. Reads/writes/edits to that path and completed shell commands
+refresh the snapshot; an empty or deleted plan clears it. The external file remains the source
+of truth. Repository `TODO.md` files are neither consulted nor moved, removed, or ignored.
+
+`PI_CODING_AGENT_DIR` changes the default agent-directory root; `PI_TODO_DIR` explicitly overrides
+the plans root. Every session keeps its own directory, including concurrent sessions in one
+worktree. Resume reuses its plan; forks seed a separate copy from the parent's external plan.
+New directories/files use `0700`/`0600` permissions. No per-session environment variable is set
+in Pi's shared SDK process, so child sessions cannot inherit another session's plan path.
 
 ### Thread titles — generic `session_info_changed` sync
 
@@ -283,7 +304,8 @@ The former bundled `auto-title` extension moved out of this repo for exactly thi
 coupling. A reference implementation lives in [bkonkle/pi-setup](https://github.com/bkonkle/pi-setup)
 (`home/.pi/agent/extensions/auto-title.ts`): cheap-model titles in the form
 `<PR number> | <issue number> | <2-5 lowercase words>` (segments omitted when unavailable),
-refreshed every completed run by default, with a manual-rename lock that survives resume.
+generated in the background, refreshed every three completed runs by default, with a
+manual-rename lock that survives resume.
 
 Manual names win: `/name <title>` (the adapter's slash command) sets the name, pushes the
 `session_info_update`, and locks auto-titling for that session (the lock survives resume). Renaming
@@ -333,10 +355,12 @@ machine. Written so an agent can execute it; only the auth steps need a human.
    manually. If your models.json resolves the API key via a `!`-command, that script must exist on
    this machine too.
 6. **Verify** — in this repo run `npm run smoke`. Expected on stdout: an `agent_message_chunk`
-   reply and an `acp:plan` snapshot (from `todo-acp`, this repo has a `TODO.md`). With the
+   reply and an `acp:plan` snapshot from the external session plan. With the
    pi-setup auto-title extension installed you'll also see a `session_info_update` with a
    `title`. Then open a pi-acp thread in Zed and check that the thread title changes from
-   "New Agent Thread" after the first reply.
+   "New Agent Thread" after the first reply. `npm run smoke:tracking` exercises real Pi RPC with
+   an offline execution fixture (no model call), checking external plans, immediate command
+   completion, live output cards/file links, and silent cancellation.
 
 ## Authentication (ACP Registry support)
 
@@ -370,10 +394,13 @@ Project layout:
 
 ## Environment variables
 
-| Variable | Set by | Purpose |
-|----------|--------|---------|
-| `PI_ACP` | adapter → pi | Marks the spawned pi process as ACP-driven; activates the bundled extensions outside RPC mode. |
-| `PI_ACP_DATA_DIR` | you | Overrides the adapter's data directory (default `~/.pi/pi-acp/`). |
+| Variable      | Set by       | Purpose                                                                                                  |
+| ------------- | ------------ | -------------------------------------------------------------------------------------------------------- |
+| `PI_ACP`      | adapter → pi | Marks the spawned pi process as ACP-driven; activates the bundled extensions outside RPC mode.           |
+| `PI_TODO_DIR` | you          | Overrides the external session-plan root (default `<PI_CODING_AGENT_DIR>/plans` or `~/.pi/agent/plans`). |
+
+The adapter's data directory is configured with `dataDir` in `extensions/pi-acp.json`, not an
+environment variable.
 
 ## Limitations
 

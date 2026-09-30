@@ -56,6 +56,7 @@
     "lint": "eslint .",
     "test": "node --import tsx --test test/**/*.test.ts",
     "smoke": "node scripts/smoke-acp.mjs",
+    "smoke:tracking": "npm run build && node scripts/smoke-tracking.mjs",
     "prepare": "node -e \"try{require.resolve('tsup')}catch(e){process.exit(0)};require('child_process').execSync('npm run build',{stdio:'inherit'})\"",
     "prepublishOnly": "npm run test && npm run build"
   },

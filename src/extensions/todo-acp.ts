@@ -1,38 +1,27 @@
-/**
- * todo-acp — bundled pi extension: file-based TODO.md → ACP plan bridge for pi.
- *
- * Convention: the agent (and you) track work in `TODO.md` at the project root
- * using GitHub-style checkboxes:
- *
- *   - [ ] pending task
- *   - [-] or [/] or [~]  in-progress task
- *   - [x] done task
- *
- * When TODO.md is written or edited, this extension parses the checkboxes and
- * appends an `acp:plan` custom session entry. The pi-acp adapter decodes those
- * entries into ACP `plan` session updates, which Zed renders as its native todo
- * checklist (the same display OpenCode/Codex get).
- *
- * Entries are appended ONLY when pi is driven headless over RPC (ctx.mode ===
- * 'rpc', i.e. by an ACP adapter) or when PI_ACP=1 is set, so interactive
- * terminal sessions stay untouched. Upstream pi-acp ignores unknown custom
- * entries, so this is harmless with any adapter.
- *
- * Custom entries persist in the session file but do not enter model context.
- *
- * Loaded by the adapter via `-e` (see src/pi-rpc/process.ts) and/or the package
- * `pi.extensions` key — the Symbol.for guard makes double loading a no-op.
- */
+/** Session-local external TODO.md → ACP plan snapshots. Repository TODO files are never consulted. */
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 
-import { readFileSync, existsSync } from 'node:fs'
-import { join, basename } from 'node:path'
+// Pi supplies the API at load time; this package does not depend on its packages.
+interface ExtensionContext {
+  cwd: string
+  mode?: string
+  sessionManager?: { getSessionId(): unknown; getEntries?(): readonly unknown[] }
+}
 
-const LOAD_GUARD = Symbol.for('pi-acp.extension.todo-acp')
+interface ExtensionEvent {
+  reason?: string
+  previousSessionFile?: string
+  systemPrompt?: string
+  toolCallId?: string
+  toolName?: string
+  args?: unknown
+  isError?: boolean
+}
 
-// Minimal local API type: this package intentionally does not depend on pi's
-// packages (pi injects the real API at load time; only the shapes below are needed).
 interface ExtensionApi {
-  on(event: string, handler: (event: any, ctx: any) => void | Promise<void>): void
+  on(event: string, handler: (event: ExtensionEvent, ctx: ExtensionContext) => unknown): void
   appendEntry(customType: string, data?: unknown): string
 }
 
@@ -42,29 +31,6 @@ interface TodoItem {
   status: 'pending' | 'in_progress' | 'done'
   kind?: string
 }
-
-interface PlanItem {
-  id: string
-  title: string
-  status: string
-  deps?: string[]
-  kind?: string
-}
-
-const PLAN_ENTRY_TYPE = 'acp:plan'
-const TODO_FILENAME = 'TODO.md'
-const IGNORED_BASENAMES = new Set(['AGENTS.md', 'CLAUDE.md'])
-
-// ExtensionAPI handle, captured in the factory. Module-level helpers need it
-// because they run outside the factory's scope.
-let api: { appendEntry(customType: string, data?: unknown): string } | null = null
-
-let active = process.env.PI_ACP === '1'
-let cwd = ''
-let seq = 0
-let lastSig = ''
-// toolCallId -> target path, captured at tool_execution_start
-const pendingPaths = new Map<string, string>()
 
 function slug(text: string): string {
   return (
@@ -97,10 +63,9 @@ function mapStatus(marker: string): TodoItem['status'] | null {
 export function parseTodoMd(text: string): TodoItem[] {
   const items: TodoItem[] = []
   const seen = new Map<string, number>()
-  const lines = text.split(/\r?\n/)
   let section: string | undefined
 
-  for (const raw of lines) {
+  for (const raw of text.split(/\r?\n/)) {
     const heading = raw.match(/^#{1,6}\s+(.*)/)
     if (heading) {
       section = heading[1].trim()
@@ -109,22 +74,18 @@ export function parseTodoMd(text: string): TodoItem[] {
 
     const m = raw.match(/^\s*[-*+]?\s*\[([^\]]*)\]\s*(.*)$/)
     if (!m) continue
-
     const status = mapStatus(m[1])
     if (status === null) continue
 
-    let title = m[2].trim()
-    // Strip trailing markdown noise from task text
-    title = title.replace(/\s+`[^`]*`$/, '').trim() || 'untitled'
-
+    const title =
+      m[2]
+        .trim()
+        .replace(/\s+`[^`]*`$/, '')
+        .trim() || 'untitled'
     const base = slug(title)
     const n = seen.get(base) ?? 0
     seen.set(base, n + 1)
-    const id = n === 0 ? base : `${base}-${n + 1}`
-
-    const item: TodoItem = { id, title, status }
-    // Section headers become a kind prefix, mirroring how the adapter
-    // decorates entries from other namespaces.
+    const item: TodoItem = { id: n === 0 ? base : `${base}-${n + 1}`, title, status }
     if (section && !/^todo/i.test(section)) item.kind = section.toLowerCase()
     items.push(item)
   }
@@ -132,99 +93,168 @@ export function parseTodoMd(text: string): TodoItem[] {
   return items
 }
 
-function toPlanItems(items: TodoItem[]): PlanItem[] {
-  return items.map(it => ({
-    id: it.id,
-    title: it.kind ? `(${it.kind}) ${it.title}` : it.title,
-    status: it.status
-  }))
+function validSessionId(id: unknown): id is string {
+  return typeof id === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(id)
 }
 
-function emit(items: TodoItem[]): void {
-  if (!active) return
-  const sig = JSON.stringify(items.map(i => [i.id, i.status, i.kind]))
-  if (sig === lastSig) return
-  lastSig = sig
-  seq += 1
-  try {
-    api?.appendEntry(PLAN_ENTRY_TYPE, {
-      op: 'snapshot',
-      ns: 'todo',
-      seq,
-      items: toPlanItems(items)
-    })
-  } catch (err) {
-    // Surface real bugs — silent failures here look like "todo panel broken"
-    console.error(`[todo-acp] appendEntry failed:`, err)
-  }
+function absolutePath(path: string, cwd: string): string {
+  const p = path.startsWith('@') ? path.slice(1) : path
+  return resolve(cwd, p === '~' ? homedir() : p.startsWith('~/') ? join(homedir(), p.slice(2)) : p)
 }
 
-function parseAndEmit(): void {
-  if (!cwd) return
-  const file = join(cwd, TODO_FILENAME)
-  if (!existsSync(file)) return
+function previousSessionId(file: string): string | null {
   try {
-    emit(parseTodoMd(readFileSync(file, 'utf8')))
+    const header: unknown = JSON.parse(readFileSync(file, 'utf8').split(/\r?\n/, 1)[0])
+    if (
+      header &&
+      typeof header === 'object' &&
+      'type' in header &&
+      header.type === 'session' &&
+      'id' in header &&
+      validSessionId(header.id)
+    ) {
+      return header.id
+    }
   } catch {
-    // unreadable/partial write — skip until the next event
+    // A missing or malformed parent session must not prevent starting a fork.
   }
-}
-
-function targetPath(args: Record<string, unknown> | undefined): string | null {
-  if (!args || typeof args !== 'object') return null
-  const p = (args as { path?: unknown }).path
-  if (typeof p === 'string') return p
   return null
 }
 
-function isTodoPath(p: string | null | undefined): boolean {
-  if (!p) return false
-  if (IGNORED_BASENAMES.has(basename(p))) return false
-  // Match TODO.md (any case) anywhere: project root, nested plans/, etc.
-  return /todo\.md$/i.test(p)
-}
-
 export default function (pi: ExtensionApi) {
-  const g = globalThis as Record<symbol, unknown>
-  if (g[LOAD_GUARD]) return
-  g[LOAD_GUARD] = true
+  let active = false
+  let cwd = ''
+  let planPath = ''
+  let seq = 0
+  let lastSig = ''
+  const pendingPaths = new Map<string, string>()
 
-  api = pi
+  function emit(items: TodoItem[]): void {
+    if (!active) return
+    const sig = JSON.stringify(items)
+    if (sig === lastSig) return
+    try {
+      pi.appendEntry('acp:plan', {
+        op: 'snapshot',
+        ns: 'todo',
+        seq: seq + 1,
+        items: items.map(it => ({
+          id: it.id,
+          title: it.kind ? `(${it.kind}) ${it.title}` : it.title,
+          status: it.status
+        }))
+      })
+      lastSig = sig
+      seq += 1
+    } catch (err) {
+      console.error('[todo-acp] appendEntry failed:', err)
+    }
+  }
 
-  pi.on('session_start', (_event: unknown, ctx: { cwd: string; mode?: string }) => {
-    const mode = (ctx as unknown as { mode?: string } | null)?.mode
-    active = mode === 'rpc' || process.env.PI_ACP === '1'
+  function refresh(): void {
+    if (!active || !planPath) return
+    try {
+      emit(parseTodoMd(readFileSync(planPath, 'utf8')))
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code === 'ENOENT' || code === 'ENOTDIR') emit([])
+      // Other read failures may be temporary; retain the snapshot until the next event.
+    }
+  }
+
+  pi.on('session_start', (event, ctx) => {
+    active = ctx.mode === 'rpc' || process.env.PI_ACP === '1'
     cwd = ctx.cwd
+    planPath = ''
     seq = 0
     lastSig = ''
-    if (active) parseAndEmit()
+    pendingPaths.clear()
+    if (!active) return
+
+    // Reload/resume must advance past snapshots already seen by the adapter.
+    try {
+      for (const entry of ctx.sessionManager?.getEntries?.() ?? []) {
+        if (!entry || typeof entry !== 'object') continue
+        const record = entry as { type?: unknown; customType?: unknown; data?: unknown }
+        if (record.type !== 'custom' || record.customType !== 'acp:plan') continue
+        if (!record.data || typeof record.data !== 'object') continue
+        const data = record.data as { ns?: unknown; seq?: unknown }
+        if (data.ns === 'todo' && typeof data.seq === 'number' && Number.isSafeInteger(data.seq)) {
+          seq = Math.max(seq, data.seq)
+        }
+      }
+    } catch {
+      // Older/minimal session managers may not expose entries.
+    }
+
+    let id: unknown
+    try {
+      id = ctx.sessionManager?.getSessionId()
+    } catch {
+      // Fail closed rather than sharing a plan with an unidentified session.
+    }
+    if (!validSessionId(id)) {
+      emit([])
+      return
+    }
+
+    const root = absolutePath(
+      process.env.PI_TODO_DIR || join(process.env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent'), 'plans'),
+      cwd
+    )
+    planPath = join(root, id, 'TODO.md')
+    try {
+      mkdirSync(dirname(planPath), { recursive: true, mode: 0o700 })
+      if (!existsSync(planPath)) {
+        let seed = ''
+        if (event.reason === 'fork' && event.previousSessionFile) {
+          const previousId = previousSessionId(event.previousSessionFile)
+          if (previousId && previousId !== id) {
+            try {
+              seed = readFileSync(join(root, previousId, 'TODO.md'), 'utf8')
+            } catch {
+              // No parent plan: start empty.
+            }
+          }
+        }
+        writeFileSync(planPath, seed, { flag: 'wx', mode: 0o600 })
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        console.error('[todo-acp] plan initialization failed:', err)
+      }
+    }
+    refresh()
+  })
+
+  pi.on('before_agent_start', event => {
+    if (!active || !planPath) return
+    return {
+      systemPrompt: `${event.systemPrompt ?? ''}\n\nAgent task tracking: use only ${JSON.stringify(planPath)}. Use GitHub checkboxes: - [ ] pending, - [-] in progress, - [x] done. This external file is the source of truth for agent tasks. Never automatically create, read, move, ignore, or delete repository TODO.md files for task tracking; leave human TODO.md files unaffected.`
+    }
   })
 
   pi.on('session_shutdown', () => {
     pendingPaths.clear()
+    active = false
+    planPath = ''
   })
 
-  type ToolEvent = { toolCallId: string; toolName?: string; args?: unknown; isError?: boolean }
-  pi.on('tool_execution_start', (event: ToolEvent) => {
-    const p = targetPath(event.args as Record<string, unknown>)
-    if (p && isTodoPath(p)) pendingPaths.set(event.toolCallId, p)
+  pi.on('tool_execution_start', event => {
+    if (!active || !planPath || !event.toolCallId) return
+    pendingPaths.delete(event.toolCallId)
+    if (!['read', 'write', 'edit'].includes(event.toolName ?? '')) return
+    if (!event.args || typeof event.args !== 'object' || !('path' in event.args)) return
+    const path = event.args.path
+    if (typeof path === 'string' && absolutePath(path, cwd) === planPath) {
+      pendingPaths.set(event.toolCallId, planPath)
+    }
   })
 
-  pi.on('tool_execution_end', (event: ToolEvent) => {
-    if (event.isError) return
-    // File tools: react if this call touched TODO.md
-    if (pendingPaths.delete(event.toolCallId)) {
-      parseAndEmit()
-      return
-    }
-    // Bash: react if the command referenced TODO.md (cheap heuristic —
-    // reparsing is idempotent and signature-gated, so false positives are free)
-    if (
-      event.toolName === 'bash' &&
-      typeof (event as unknown as { args?: { command?: unknown } }).args?.command === 'string' &&
-      /todo\.md/i.test((event as unknown as { args: { command: string } }).args.command)
-    ) {
-      parseAndEmit()
-    }
+  pi.on('tool_execution_end', event => {
+    const target = event.toolCallId ? pendingPaths.get(event.toolCallId) : undefined
+    if (event.toolCallId) pendingPaths.delete(event.toolCallId)
+    // Shell commands can remove a parent directory or mutate the plan before failing.
+    if (event.toolName === 'bash' || (!event.isError && target === planPath)) refresh()
   })
 }

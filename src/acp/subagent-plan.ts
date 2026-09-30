@@ -1,4 +1,6 @@
-import type { PlanEntry } from '@agentclientprotocol/sdk'
+import type { PlanEntry, ToolCall, ToolCallContent } from '@agentclientprotocol/sdk'
+import { isAbsolute } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 /**
  * Maps the pi-subagents fleet into an ACP Plan. pi itself emits no ACP plans, so the plan channel
@@ -37,6 +39,15 @@ export type BridgeSubagent = {
   /** Failure detail (from `subagents:record`). */
   error?: string
   durationMs?: number
+  startedAt?: number
+  completedAt?: number
+  observedAt?: number
+  lastActivityAt?: number
+  toolUses?: number
+  toolCallId?: string
+  latestOutput?: string
+  outputFile?: string
+  sessionFile?: string
 }
 
 export type SubagentEntry = { clear: true } | { agent: BridgeSubagent }
@@ -58,7 +69,8 @@ export function parseSubagentEntry(data: unknown): SubagentEntry | null {
       id: rec.id,
       type: typeof rec.type === 'string' ? rec.type : undefined,
       description: typeof rec.description === 'string' ? rec.description : undefined,
-      status: typeof rec.status === 'string' ? rec.status : undefined
+      status: typeof rec.status === 'string' ? rec.status : undefined,
+      ...parseDetails(data)
     }
   }
 }
@@ -93,12 +105,29 @@ export function parseSubagentRecord(data: unknown): BridgeSubagent | null {
     status: typeof rec.status === 'string' ? rec.status : undefined,
     result: typeof rec.result === 'string' ? rec.result : undefined,
     error: typeof rec.error === 'string' ? rec.error : undefined,
-    durationMs
+    durationMs,
+    ...parseDetails(data)
   }
 }
 
+function parseDetails(data: object): Partial<BridgeSubagent> {
+  const rec = data as Record<string, unknown>
+  const details: Partial<BridgeSubagent> = {}
+  for (const key of ['result', 'error', 'toolCallId', 'latestOutput', 'outputFile', 'sessionFile'] as const) {
+    if (typeof rec[key] === 'string') details[key] = rec[key]
+  }
+  for (const key of ['durationMs', 'startedAt', 'completedAt', 'observedAt', 'lastActivityAt', 'toolUses'] as const) {
+    const value = rec[key]
+    const timestamp = key.endsWith('At')
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0 && (!timestamp || value <= 8.64e15)) {
+      details[key] = value
+    }
+  }
+  return details
+}
+
 const IN_PROGRESS_STATUSES = new Set(['started', 'running', 'steered', 'compacted'])
-const FAILED_STATUSES = new Set(['failed', 'stopped', 'aborted', 'error'])
+const FAILED_STATUSES = new Set(['failed', 'stopped', 'aborted', 'error', 'interrupted'])
 
 // ACP PlanEntryStatus has no failed/aborted/errored, so these terminal statuses all render as
 // `completed` — but we keep the distinction in the content suffix instead of flattening to "failed".
@@ -106,7 +135,8 @@ const TERMINAL_LABELS: Record<string, string> = {
   failed: 'failed',
   error: 'errored',
   stopped: 'stopped',
-  aborted: 'aborted'
+  aborted: 'aborted',
+  interrupted: 'interrupted'
 }
 
 /**
@@ -132,10 +162,22 @@ export function statusRank(status: string | undefined): number {
  * those keys don't clobber a prior value).
  */
 export function mergeSubagent(prev: BridgeSubagent | undefined, incoming: BridgeSubagent): BridgeSubagent {
-  const merged: BridgeSubagent = { ...prev, ...incoming }
-  if (prev?.type && !incoming.type) merged.type = prev.type
-  if (prev?.description && !incoming.description) merged.description = prev.description
-  if (prev) {
+  const merged: BridgeSubagent = {
+    ...prev,
+    ...Object.fromEntries(Object.entries(incoming).filter(([, value]) => value !== undefined)),
+    id: incoming.id
+  }
+  const newRun =
+    prev && statusRank(incoming.status) < 2 && incoming.startedAt != null && incoming.startedAt > (prev.startedAt ?? 0)
+  if (newRun) {
+    delete merged.result
+    delete merged.error
+    delete merged.completedAt
+    delete merged.durationMs
+    delete merged.latestOutput
+    if (incoming.latestOutput !== undefined) merged.latestOutput = incoming.latestOutput
+  }
+  if (prev && !newRun) {
     const prevStatus = String(prev.status ?? '').toLowerCase()
     const incomingStatus = String(incoming.status ?? '').toLowerCase()
     const prevRank = statusRank(prevStatus)
@@ -199,4 +241,72 @@ function toPlanEntry(agent: BridgeSubagent): PlanEntry {
 /** Build the ACP Plan `entries` list from the accumulated fleet. */
 export function toPlanEntries(agents: Iterable<BridgeSubagent>): PlanEntry[] {
   return Array.from(agents, toPlanEntry)
+}
+
+const CARD_OUTPUT_MAX = 32_000
+
+/** A separate ACP tool row keeps detached execution inspectable after Agent returns its id. */
+export function subagentToolCall(agent: BridgeSubagent): ToolCall {
+  const rawStatus = String(agent.status ?? 'queued').toLowerCase()
+  const terminal = statusRank(rawStatus) === 2
+  const status = FAILED_STATUSES.has(rawStatus)
+    ? 'failed'
+    : terminal
+      ? 'completed'
+      : statusRank(rawStatus) === 1
+        ? 'in_progress'
+        : 'pending'
+  const label = agent.description?.trim() || agent.id
+  const state = rawStatus === 'started' ? 'running' : rawStatus === 'created' ? 'queued' : rawStatus
+  const lines = [`**${state}** · agent \`${agent.id}\``]
+  const end = agent.completedAt ?? agent.observedAt
+  const duration =
+    agent.durationMs ?? (end != null && agent.startedAt != null ? Math.max(0, end - agent.startedAt) : undefined)
+  if (duration != null) lines.push(`Elapsed: ${Math.floor(duration / 1000)}s`)
+  if (agent.toolUses != null) lines.push(`Tool uses: ${agent.toolUses}`)
+  if (agent.observedAt != null) lines.push(`Status observed: ${new Date(agent.observedAt).toISOString()}`)
+  if (agent.lastActivityAt != null) lines.push(`Last output activity: ${new Date(agent.lastActivityAt).toISOString()}`)
+  else if (!terminal) lines.push('No output activity observed yet; a running status is not proof of progress.')
+  if (agent.error) lines.push(`\n${agent.error.slice(0, CARD_OUTPUT_MAX)}`)
+  const output = agent.result ?? agent.latestOutput
+  if (output) {
+    const preview =
+      output.length > CARD_OUTPUT_MAX
+        ? output.slice(0, CARD_OUTPUT_MAX) + '\n[Preview truncated; open the output file for the rest.]'
+        : output
+    lines.push(`\n${terminal ? 'Result' : 'Latest output'}:\n\n${preview}`)
+  }
+  const paths = [
+    ...new Set([agent.outputFile, agent.sessionFile].filter((p): p is string => typeof p === 'string' && isAbsolute(p)))
+  ]
+  const content: ToolCallContent[] = [{ type: 'content', content: { type: 'text', text: lines.join('\n') } }]
+  for (const path of paths) {
+    content.push({
+      type: 'content',
+      content: {
+        type: 'resource_link',
+        uri: pathToFileURL(path).href,
+        name: path === agent.outputFile ? 'Full subagent output' : 'Subagent session transcript'
+      }
+    })
+  }
+  return {
+    toolCallId: `pi-subagent-${agent.id}`,
+    title: `Subagent: ${agent.type ? `[${agent.type}] ` : ''}${label} — ${state}`,
+    kind: 'other',
+    status,
+    content,
+    ...(paths.length ? { locations: paths.map(path => ({ path })) } : {}),
+    rawOutput: {
+      agentId: agent.id,
+      status: rawStatus,
+      startedAt: agent.startedAt,
+      completedAt: agent.completedAt,
+      observedAt: agent.observedAt,
+      lastActivityAt: agent.lastActivityAt,
+      outputFile: agent.outputFile,
+      sessionFile: agent.sessionFile
+    },
+    _meta: { piAcp: { subagentId: agent.id } }
+  }
 }
