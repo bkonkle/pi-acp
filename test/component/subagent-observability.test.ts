@@ -23,17 +23,16 @@ function setup(proc = new FakePiRpcProcess()) {
   })
   return { proc, conn, session }
 }
-function cards(conn: FakeAgentSideConnection) {
+function cards(conn: FakeAgentSideConnection, id = 'pi-subagent-child') {
   return conn.updates
     .map(u => u.update)
     .filter(
       (u): u is Extract<SessionUpdate, { sessionUpdate: 'tool_call' | 'tool_call_update' }> =>
-        (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') &&
-        u.toolCallId === 'pi-subagent-child'
+        (u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update') && u.toolCallId === id
     )
 }
 
-test('detached agents have one expandable card with structured activity, final output, and compact log links', async () => {
+test('detached agents pair a native status row with live expandable activity, final output, and log links', async () => {
   const { proc, conn } = setup()
   proc.emit(
     entry('acp:subagents', {
@@ -87,7 +86,21 @@ test('detached agents have one expandable card with structured activity, final o
     assert.ok(!JSON.stringify(row).includes('Reading the auth middleware'), 'never render JSONL tails')
     assert.match(String(row.rawInput), /Inspect the authorization middleware/)
   }
-  assert.match(rows[1].title ?? '', /Find auth · 3 tools · 11s/)
+  const headers = cards(conn, 'pi-subagent-status-child')
+  assert.equal(headers.length, rows.length)
+  for (let i = 0; i < headers.length; i++) {
+    assert.equal(headers[i].sessionUpdate, rows[i].sessionUpdate)
+    assert.equal(headers[i].status, rows[i].status)
+    assert.equal(headers[i].name, 'spawn_agent', 'Zed selects native spinner/checkmark visuals')
+    assert.equal(headers[i]._meta?.tool_name, 'spawn_agent')
+    assert.equal(headers[i]._meta?.subagent_session_info, undefined)
+    assert.deepEqual(headers[i].content, [], 'details are only on the expandable second row')
+    assert.equal(headers[i].rawInput, undefined)
+    assert.deepEqual(headers[i].locations, [])
+  }
+  assert.match(headers[1].title ?? '', /Find auth · 3 tools · 11s/)
+  assert.match(rows[1].title ?? '', /Details · Find auth/)
+  assert.equal(rows[1].name, 'Agent', 'details use the standard expandable renderer')
   assert.equal((rows[1]._meta?.piAcp as { lastActivityAt: number }).lastActivityAt, 11_000)
   assert.match(JSON.stringify(rows[1].content), /Tool activity/)
   assert.match(JSON.stringify(rows[1].content), /src\/auth.ts/)
@@ -100,7 +113,11 @@ test('detached agents have one expandable card with structured activity, final o
   assert.match(JSON.stringify(rows[2].content), /Found a missing authorization check/)
   assert.equal(rows[3].status, 'completed', 'late lifecycle entries must not reopen a finished row')
   const creates = conn.updates.filter(u => u.update.sessionUpdate === 'tool_call')
-  assert.equal(creates.length, 1, 'no separate launch, status, or file-output cards')
+  assert.deepEqual(
+    creates.map(u => (u.update as { toolCallId: string }).toolCallId),
+    ['pi-subagent-status-child', 'pi-subagent-child'],
+    'status first, details second; no separate launch or file-output cards'
+  )
 })
 
 test('idle process death and session disposal close unfinished rows and detach old event handlers', async () => {
@@ -112,7 +129,8 @@ test('idle process death and session disposal close unfinished rows and detach o
   proc.emit(entry('acp:subagents', { id: 'child', status: 'running' }))
   await flush()
   assert.equal(cards(conn).at(-1)?.status, 'failed')
-  assert.match(cards(conn).at(-1)?.title ?? '', /interrupted/)
+  assert.match(cards(conn, 'pi-subagent-status-child').at(-1)?.title ?? '', /interrupted/)
+  assert.equal(cards(conn, 'pi-subagent-status-child').at(-1)?.status, 'failed')
   assert.equal(cards(conn).length, 2, 'old process updates cannot revive a disposed session')
   assert.ok(
     conn.updates.some(
@@ -171,7 +189,8 @@ test('resume restores active-branch output, marks orphaned execution interrupted
   assert.equal(cards(conn).at(-1)?.status, 'failed')
   assert.ok(!JSON.stringify(cards(conn).at(-1)).includes('Partial findings'))
   assert.match(JSON.stringify(cards(conn).at(-1)?.content), /Full log/)
-  assert.equal(conn.updates.filter(u => u.update.sessionUpdate === 'tool_call').length, 1)
+  assert.equal(conn.updates.filter(u => u.update.sessionUpdate === 'tool_call').length, 2)
+  assert.equal(cards(conn, 'pi-subagent-status-child').at(-1)?.status, 'failed')
   assert.ok(!JSON.stringify(conn.updates).includes('wrong-branch'))
   const plan = conn.updates
     .map(u => u.update)
@@ -181,6 +200,8 @@ test('resume restores active-branch output, marks orphaned execution interrupted
   proc.emit(entry('acp:subagents', { id: 'child', status: 'running', startedAt: 20_000, observedAt: 20_000 }))
   await flush()
   assert.equal(cards(conn).at(-1)?.status, 'in_progress')
+  assert.equal(cards(conn, 'pi-subagent-status-child').at(-1)?.status, 'in_progress')
+  assert.equal(conn.updates.filter(u => u.update.sessionUpdate === 'tool_call').length, 2, 'resume reuses both rows')
   assert.ok(!JSON.stringify(cards(conn).at(-1)?.content).includes('Partial findings'))
   assert.ok(!JSON.stringify(cards(conn).at(-1)?.content).includes('no longer attached'))
 })

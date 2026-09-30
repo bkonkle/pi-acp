@@ -286,8 +286,8 @@ function codeBlock(text: string): string {
   return `${fence}\n${text}\n${fence}`
 }
 
-/** Standard ACP cards expand in stock Zed; native spawn_agent headers require a registered child. */
-export function subagentToolCall(agent: BridgeSubagent): ToolCall {
+/** Native status visuals and expandable live details need separate rows in stock Zed. */
+export function subagentToolCalls(agent: BridgeSubagent): [ToolCall, ToolCall] {
   const rawStatus = String(agent.status ?? 'queued').toLowerCase()
   const terminal = statusRank(rawStatus) === 2
   const status = FAILED_STATUSES.has(rawStatus)
@@ -347,9 +347,10 @@ export function subagentToolCall(agent: BridgeSubagent): ToolCall {
         .join(' · ')
     )
   }
-  return {
+  const details: ToolCall = {
     toolCallId: `pi-subagent-${agent.id}`,
-    title: `${status === 'completed' ? '✓ ' : status === 'failed' ? '✕ ' : ''}${title}${state === 'running' ? ' · running' : ''}`,
+    name: 'Agent',
+    title: `Details · ${agentLabel(agent)}`,
     kind: 'other',
     status,
     // A string renders as Markdown rather than a JSON argument dump in Zed.
@@ -366,4 +367,17 @@ export function subagentToolCall(agent: BridgeSubagent): ToolCall {
       }
     }
   }
+  return [
+    {
+      toolCallId: `pi-subagent-status-${agent.id}`,
+      name: 'spawn_agent',
+      title,
+      kind: 'other',
+      status,
+      content: [],
+      locations: [],
+      _meta: { ...details._meta, tool_name: 'spawn_agent' }
+    },
+    details
+  ]
 }

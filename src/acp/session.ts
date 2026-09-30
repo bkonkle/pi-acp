@@ -39,7 +39,7 @@ import {
   parseSubagentEntry,
   parseSubagentRecord,
   statusRank,
-  subagentToolCall,
+  subagentToolCalls,
   toPlanEntries,
   type BridgeSubagent
 } from './subagent-plan.js'
@@ -786,10 +786,11 @@ export class PiAcpSession {
       agent = { ...agent, prompt }
       this.subagentFleet.set(agent.id, agent)
     }
-    const call = subagentToolCall(agent)
     const exists = this.subagentCards.has(agent.id)
     this.subagentCards.add(agent.id)
-    this.emit(exists ? { sessionUpdate: 'tool_call_update', ...call } : { sessionUpdate: 'tool_call', ...call })
+    for (const call of subagentToolCalls(agent)) {
+      this.emit(exists ? { sessionUpdate: 'tool_call_update', ...call } : { sessionUpdate: 'tool_call', ...call })
+    }
   }
 
   private trackAgentInvocation(toolCallId: string, args: unknown, status: 'pending' | 'in_progress'): void {

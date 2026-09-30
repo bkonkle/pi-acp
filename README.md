@@ -222,11 +222,15 @@ Extension commands can be invoked by typing their slash command, but are not adv
 pi itself emits no ACP plans, so the ACP `plan` (task-list) channel is unused. When you use the
 [pi-subagents](https://github.com/tintinweb/pi-subagents) extension, pi-acp can surface the running
 subagent fleet as an ACP plan — each subagent becomes a task with `pending` / `in_progress` /
-`completed` status. Each also gets **one expandable standard ACP tool card**, usable in stock Zed.
-Its title shows the task, execution state, tool count, and elapsed time. Expand it to read the task
-instructions, recent tool calls with commands/paths and short output previews, and a Markdown
-**Subagent Output** section. Existing logs appear as short named links inside the same card;
-the primary file also has a Go to File action. There is no separate successful launch or file-output row.
+`completed` status. Each also gets **two adjacent rows**, usable in stock Zed:
+
+- A native status row with Zed's spinner/checkmark/error icon, task, tool count, and elapsed time.
+- An expandable **Details** card below it, available while the child is running. It shows task
+  instructions, recent tool calls with commands/paths and short output previews, the latest
+  response, and a Markdown **Subagent Output** section on completion.
+
+Existing logs appear as short named links inside the details card; the primary file also has a
+Go to File action. There is no separate successful launch or file-output row.
 
 The bridge observes the child's SDK session directly: tool start/end events update the activity,
 while message hydration fills in missed history without duplicating calls or reopening finished ones.
@@ -241,9 +245,9 @@ of the parent prompt alone does not finish a child. Reloaded history restores ca
 without replaying a redundant successful launch. If upstream transcripts are disabled, no new output
 file is created; bounded card data remains in the existing ACP session-tracking entries.
 
-This is intentionally **not** Zed's native child-thread renderer. The `spawn_agent` metadata selects
-a header with no usable expansion unless a child conversation is registered inside Zed. Standard ACP
-cards provide the working disclosure arrow and Markdown details instead; Zed retains its standard
+The status row uses `spawn_agent` to select Zed's native status visuals. That header cannot expand
+without a child conversation registered inside Zed, so the separate standard ACP details card
+provides the working disclosure arrow and live Markdown output. Zed retains its standard
 input/output labels. Native child-thread navigation/maximize is unavailable without changes to Zed,
 and no fictitious child session is advertised.
 
@@ -381,7 +385,7 @@ machine. Written so an agent can execute it; only the auth steps need a human.
    `title`. Then open a pi-acp thread in Zed and check that the thread title changes from
    "New Agent Thread" after the first reply. `npm run smoke:tracking` exercises real Pi RPC with
    an offline execution fixture (no model call), checking external plans, immediate command
-   completion, expandable cards with tool activity/log links, and silent cancellation.
+   completion, native status rows with live expandable details/log links, and silent cancellation.
    `npm run smoke:package` also packs the npm artifact and loads its advertised extensions through
    the real Pi resource loader (requires the Pi SDK installed locally or globally).
 

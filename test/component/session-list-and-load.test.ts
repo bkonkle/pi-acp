@@ -173,6 +173,25 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
       assert.match(String(child.rawInput), /Check authorization/)
       assert.match(JSON.stringify(child.content), /Permission check found/)
       assert.match(JSON.stringify(child.content), /Permission checks passed/)
+      const restoredRows = conn.updates
+        .map(u => u.update)
+        .filter(
+          (u): u is Extract<typeof u, { sessionUpdate: 'tool_call' }> =>
+            u.sessionUpdate === 'tool_call' &&
+            ['pi-subagent-status-tracked-child', 'pi-subagent-tracked-child'].includes(u.toolCallId)
+        )
+      assert.deepEqual(
+        restoredRows.map(u => u.toolCallId),
+        ['pi-subagent-status-tracked-child', 'pi-subagent-tracked-child']
+      )
+      assert.deepEqual(
+        restoredRows.map(u => u.name),
+        ['spawn_agent', 'Agent']
+      )
+      assert.deepEqual(
+        restoredRows.map(u => u.status),
+        ['completed', 'completed']
+      )
     } finally {
       PiRpcProcess.spawn = originalSpawn
     }

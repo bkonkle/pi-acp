@@ -1,12 +1,16 @@
 Fork of georgeharker/pi-acp. Local patches:
 
-## Expandable ACP subagent cards (stock Zed)
+## Native status plus expandable subagent details (stock Zed)
 
 The header-only approach below matched Zed's native status styling but could not expand without
-an internal child thread. It also left redundant launch/file rows. We now use one standard ACP
-card per child with task instructions as Markdown input, recent child tools and output snippets,
-a readable final result, and short log links. No Zed patch or fictitious child session is needed.
-Zed's standard input/output labels remain; native maximize/navigation is not available.
+an internal child thread. The single standard card at `32fba6c` expanded live output but showed a
+hammer, not a spinner. Each child now has two adjacent rows: a `spawn_agent` status header with
+Zed's spinner/checkmark/error visuals, followed by an expandable standard Details card. Both keep
+stable identities and update together through completion, failure, interruption, and resume.
+The details card retains task instructions as Markdown input, recent child tools and output
+snippets, the latest response, a readable final result, and short log links. No Zed patch or
+fictitious child session is needed. Zed's standard input/output labels remain; native
+maximize/navigation is not available.
 
 The bridge subscribes to the public child SDK session and hydrates missed message history.
 Activity is bounded to eight tools, with 320-character/four-line output snippets; task prompts and
@@ -18,14 +22,15 @@ and parent cancellation cannot emit updates for a launch row that was never crea
 
 Regression tests cover streaming/hydration, ownership, cancellation, resume, startup failures,
 large results, replay deduplication, and retained full model results. The RPC smoke checks real
-bridge packets containing command/output activity, compact log links, and a silent abort.
+paired status/detail bridge packets containing live command/output activity, compact log links,
+and a silent abort. Tests also check header-before-details ordering and reuse of both rows.
 
 Review regressions: response resets cross RPC as an explicit empty string, so a text-free failed
 reply cannot keep an earlier response visible. The npm artifact includes the source helpers
 required by its advertised extension entry points. Tests import those entry points from an actual
 packed tarball; `smoke:package` additionally loads them using the real Pi resource loader.
 
-## Native Zed subagent status rows (superseded by expandable cards)
+## Historical native-header-only approach (superseded by paired rows)
 
 The previous synthetic cards embedded up to 32,000 characters of transcript on every update.
 They were noisy and still truncated. Commit `7410970` used `_meta.tool_name: "spawn_agent"`,

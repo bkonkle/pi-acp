@@ -22,7 +22,7 @@ function setup() {
   return { proc, conn, session }
 }
 
-test('successful Agent launches use only the child execution card; returning its id does not finish background work', async () => {
+test('successful Agent launches use only the paired child rows; returning its id does not finish background work', async () => {
   const { proc, conn, session } = setup()
   const prompt = 'Inspect authorization. '.repeat(1000)
   const args = { prompt, description: 'Check authorization', subagent_type: 'Explore' }
@@ -46,7 +46,7 @@ test('successful Agent launches use only the child execution card; returning its
   }
   proc.emit({ type: 'tool_execution_end', toolCallId: 'launch', result })
   await flush()
-  assert.equal(conn.updates.filter(u => u.update.sessionUpdate === 'tool_call').length, 1)
+  assert.equal(conn.updates.filter(u => u.update.sessionUpdate === 'tool_call').length, 2)
   let card = conn.updates
     .map(u => u.update)
     .filter(
@@ -103,7 +103,7 @@ test('foreground children correlate by result agentId even without toolCallId in
   })
   await flush()
   const creates = conn.updates.filter(u => u.update.sessionUpdate === 'tool_call')
-  assert.equal(creates.length, 1)
+  assert.equal(creates.length, 2)
   const final = conn.updates
     .map(u => u.update)
     .filter(u => u.sessionUpdate === 'tool_call_update')
@@ -139,7 +139,11 @@ test('parent cancellation and late launch results do not interrupt background wo
   const tools = conn.updates
     .map(u => u.update)
     .filter(u => u.sessionUpdate === 'tool_call' || u.sessionUpdate === 'tool_call_update')
-  assert.ok(tools.every(u => u.toolCallId === 'pi-subagent-child'))
+  assert.ok(tools.every(u => u.toolCallId === 'pi-subagent-child' || u.toolCallId === 'pi-subagent-status-child'))
+  for (const id of ['pi-subagent-child', 'pi-subagent-status-child']) {
+    assert.equal(tools.filter(u => u.toolCallId === id && u.sessionUpdate === 'tool_call').length, 1)
+    assert.equal(tools.filter(u => u.toolCallId === id).at(-1)?.status, 'in_progress')
+  }
   assert.equal(tools.at(-1)?.status, 'in_progress')
   session.dispose()
 })
@@ -210,7 +214,9 @@ test('the same expandable card keeps errors readable without transcripts and cle
     })
   )
   await flush()
-  const first = conn.updates.find(u => u.update.sessionUpdate === 'tool_call')?.update
+  const first = conn.updates.find(
+    u => u.update.sessionUpdate === 'tool_call' && u.update.toolCallId === 'pi-subagent-failed'
+  )?.update
   assert.ok(first?.sessionUpdate === 'tool_call')
   assert.equal(first.status, 'failed')
   assert.match(JSON.stringify(first.content), /Language server failed/)
@@ -246,6 +252,6 @@ test('the same expandable card keeps errors readable without transcripts and cle
   assert.equal(final.status, 'completed')
   assert.match(JSON.stringify(final.content), /Permission checks passed/)
   assert.ok(!JSON.stringify(final).includes('Language server failed'))
-  assert.equal(conn.updates.filter(u => u.update.sessionUpdate === 'tool_call').length, 1)
+  assert.equal(conn.updates.filter(u => u.update.sessionUpdate === 'tool_call').length, 2)
   session.dispose()
 })

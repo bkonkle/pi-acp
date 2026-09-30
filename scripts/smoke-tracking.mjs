@@ -133,6 +133,13 @@ try {
     'Agent',
     'standard expandable renderer, not header-only native metadata'
   )
+  const header = await waitFor(
+    m => m.params?.update?.toolCallId === 'pi-subagent-status-smoke-child' && m.params.update.status === 'in_progress'
+  )
+  assert.equal(header.params.update.name, 'spawn_agent', 'native spinner while child is running')
+  assert.equal(header.params.update._meta.tool_name, 'spawn_agent')
+  assert.deepEqual(header.params.update.content, [])
+  assert.equal(live.params.update.name, 'Agent', 'live details remain expandable')
   assert.equal(live.params.update.kind, 'other')
   assert.ok(JSON.stringify(live.params.update).length < 3000, 'structured activity stays bounded')
   assert.match(JSON.stringify(live.params.update.content), /Tool activity/)
@@ -145,8 +152,8 @@ try {
     messages.filter(
       m => m.params?.update?.sessionUpdate === 'tool_call' && m.params.update.toolCallId.startsWith('pi-')
     ).length,
-    1,
-    'one execution card, no extra file row'
+    2,
+    'one native status row plus one details card, no extra launch or file row'
   )
   const fullOutput = readFileSync(join(cwd, 'child.output'), 'utf8')
   assert.ok(fullOutput.length > 32_000, 'full transcript is not capped at the old preview limit')
@@ -156,10 +163,14 @@ try {
     m => m.params?.update?.toolCallId === 'pi-subagent-smoke-child' && m.params.update.status === 'failed'
   )
   assert.match(JSON.stringify(terminal.params.update.content), /Offline cancellation/)
+  const terminalHeader = await waitFor(
+    m => m.params?.update?.toolCallId === 'pi-subagent-status-smoke-child' && m.params.update.status === 'failed'
+  )
+  assert.equal(terminalHeader.params.update.name, 'spawn_agent', 'status row settles with the child')
   assert.ok(!existsSync(join(cwd, '.pi')), 'no generated task files enter the workspace')
   assert.equal(readFileSync(join(cwd, 'TODO.md'), 'utf8'), '- [ ] Human document\n')
   console.log(
-    'Real Pi RPC smoke passed: external plan, handled command completion, expandable card with tool activity, full log link, silent cancellation.'
+    'Real Pi RPC smoke passed: external plan, handled command completion, native status plus live expandable details, full log link, silent cancellation.'
   )
 } finally {
   for (const item of pending.values()) clearTimeout(item.timer)
