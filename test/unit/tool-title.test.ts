@@ -54,3 +54,19 @@ test('toolCallTitle: non-mcp tools keep their name', () => {
   assert.equal(toolCallTitle('read', { path: '/tmp/x' }), 'read')
   assert.equal(toolCallTitle('bash', { command: 'ls' }), 'bash')
 })
+
+test('toolCallTitle: built-in mcp__<server>__<tool> → server/tool', () => {
+  assert.equal(toolCallTitle('mcp__notion__notion_get_users', { user_id: 'self' }), 'notion/notion_get_users')
+  // Pi replaces `-` with `_` in server names; the first `__` still separates server and tool.
+  assert.equal(toolCallTitle('mcp__datadog_cost__list_datadog_skills', {}), 'datadog_cost/list_datadog_skills')
+})
+
+test('toolCallTitle: codemode shows the first statement, skipping the @options line', () => {
+  const code =
+    '// @options: {"timeout_ms": 60000}\n\nconst { issues } = await tools.mcp__linear__list_issues({})\nreturn issues'
+  assert.equal(
+    toolCallTitle('codemode', { code }),
+    'codemode: const { issues } = await tools.mcp__linear__list_issues({})'
+  )
+  assert.equal(toolCallTitle('codemode', {}), 'codemode')
+})

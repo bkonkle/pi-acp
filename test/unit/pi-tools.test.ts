@@ -38,3 +38,42 @@ test('toolResultToText: extracts bash stdout/stderr from details', () => {
   assert.match(text, /warn/)
   assert.match(text, /exit code: 0/)
 })
+
+test('toolResultToText: codemode lists inner calls, then output without the script header', () => {
+  const text = toolResultToText({
+    content: [
+      { type: 'text', text: 'Script completed\nWall time 0.1 seconds\nOutput:\n' },
+      { type: 'text', text: '["one","two"]' }
+    ],
+    details: {
+      calls: [
+        {
+          id: 'c/1',
+          name: 'mcp__notion__notion_get_users',
+          args: '{"user_id":"self"}',
+          status: 'ok',
+          durationMs: 305.4
+        },
+        { id: 'c/2', name: 'bash', args: '{"command":"false"}', status: 'error', durationMs: 1500, error: 'exit 1' },
+        { id: 'c/?', name: 'read', args: '{"path":"a"}', status: 'running' }
+      ]
+    }
+  })
+  assert.equal(
+    text,
+    [
+      '✓ notion/notion_get_users {"user_id":"self"} 305ms',
+      '✗ bash {"command":"false"} 1.5s\n    exit 1',
+      '… read {"path":"a"}',
+      '',
+      '["one","two"]'
+    ].join('\n')
+  )
+})
+
+test('toolResultToText: codemode progress with no output yet shows only the calls', () => {
+  const calls = Array.from({ length: 25 }, (_, i) => ({ id: `c/${i}`, name: 'bash', args: '', status: 'ok' }))
+  const lines = toolResultToText({ content: [], details: { calls } }).split('\n')
+  assert.equal(lines[0], '... (5 earlier calls)')
+  assert.equal(lines.length, 21)
+})

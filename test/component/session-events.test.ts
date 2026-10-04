@@ -1194,3 +1194,78 @@ test('PiAcpSession: bridges editor extension UI with prefill as the form default
   // decline → cancelled on pi's side
   assert.deepEqual(proc.extensionUiResponses, [{ id: 'ui-2', cancelled: true }])
 })
+
+test('PiAcpSession: codemode inner calls stay inside the codemode card', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  // Event order captured from `pi --mode rpc` 1.0.0 running a two-call codemode script.
+  const code = 'const a = await tools.bash({command:"echo one"})\nreturn a'
+  const running = { id: 'c1/?', name: 'bash', args: '{"command":"echo one"}', status: 'running' }
+  const done = { id: 'c1/1', name: 'bash', args: '{"command":"echo one"}', status: 'ok', durationMs: 16 }
+  proc.emit({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'codemode', args: { code } })
+  proc.emit({
+    type: 'tool_execution_update',
+    toolCallId: 'c1',
+    toolName: 'codemode',
+    partialResult: { content: [], details: { calls: [running] } }
+  })
+  proc.emit({
+    type: 'tool_execution_start',
+    toolCallId: 'c1/1',
+    toolName: 'bash',
+    args: { command: 'echo one' },
+    parentToolCallId: 'c1'
+  })
+  proc.emit({
+    type: 'tool_execution_update',
+    toolCallId: 'c1/1',
+    toolName: 'bash',
+    partialResult: { content: [{ type: 'text', text: 'one\n' }] },
+    parentToolCallId: 'c1'
+  })
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 'c1/1',
+    toolName: 'bash',
+    result: { content: [{ type: 'text', text: 'one\n' }] },
+    isError: false,
+    parentToolCallId: 'c1'
+  })
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 'c1',
+    toolName: 'codemode',
+    result: {
+      content: [
+        { type: 'text', text: 'Script completed\nWall time 0.1 seconds\nOutput:\n' },
+        { type: 'text', text: '"one\\n"' }
+      ],
+      details: { calls: [done] }
+    },
+    isError: false
+  })
+
+  await new Promise(r => setTimeout(r, 0))
+
+  const updates = conn.updates.map(u => u.update as any)
+  assert.deepEqual(
+    updates.map(u => u.toolCallId),
+    ['c1', 'c1', 'c1'],
+    'no separate cards for nested calls'
+  )
+  assert.equal(updates[0].sessionUpdate, 'tool_call')
+  assert.equal(updates[0].title, 'codemode: const a = await tools.bash({command:"echo one"})')
+  assert.equal(updates[1].content[0].content.text, '… bash {"command":"echo one"}')
+  assert.equal(updates[2].status, 'completed')
+  assert.equal(updates[2].content[0].content.text, '✓ bash {"command":"echo one"} 16ms\n\n"one\\n"')
+})

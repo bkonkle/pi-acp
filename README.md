@@ -39,9 +39,10 @@ On top of upstream it adds (including George Harker's changes):
 - **Elicitation bridge** — pi extension `input`/`editor` dialogs are bridged to ACP form
   `elicitation/create` when the client advertises `elicitation.form` (Zed 1.12+); other clients
   keep the cancel-with-note fallback.
-- **MCP auto-configuration** — ACP `mcpServers` are translated into a generated `<cwd>/.pi/mcp.json`
-  for [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) to load. See
-  [MCP servers](#mcp-servers).
+- **MCP auto-configuration** — ACP `mcpServers` are registered with pi's built-in MCP support
+  (pi >= 0.99) for the session. See [MCP servers](#mcp-servers).
+- **Codemode cards** — a `codemode` call is one card listing the tools its script called, with
+  their status, followed by the script output. Calls made inside the script are not separate cards.
 - **Multi-root workspaces** — additional workspace roots on `session/new` / `session/load`
   (`sessionCapabilities.additionalDirectories`), communicated to pi via `--append-system-prompt`.
 - **v2-oriented session capabilities** — advertises `session/resume`, `session/close`, and
@@ -439,29 +440,32 @@ environment variable.
 ## MCP servers
 
 MCP servers passed by the ACP client (`session/new`, `session/load`, `session/resume`) are translated
-into a **session-scoped temp file** and handed to [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter)
-via `pi --mode rpc --mcp-config <tempfile>`. stdio and http servers are supported; sse/acp servers
-cannot be expressed and are skipped with a notice. The temp file is removed when the session closes.
-Install `pi-mcp-adapter` in your pi `packages` for the servers to actually load.
+into a **session-scoped temp file**. Its path is passed to the spawned pi in `PI_ACP_MCP_CONFIG`, and
+the bundled `acp-mcp` extension registers each server with `pi.registerMcpServer()`. This needs pi's
+built-in MCP support (pi >= 0.99; remove `pi-mcp-adapter`, which replaces it). stdio and http servers
+are supported; sse/acp servers cannot be expressed and are skipped. Client display names are turned
+into pi-safe server names (`Chrome DevTools` → `Chrome-DevTools`). The temp file is removed when the
+session closes.
+
+Registered servers last only as long as the pi process and are never written to `mcp.json`. A server
+with the same name in your `~/.pi/agent/mcp.json` (or a trusted project's `.pi/mcp.json`) takes
+precedence, so a client cannot replace your own, possibly authenticated, entry.
 
 The temp file may hold secrets the client sent literally (an `Authorization` header value, or stdio
 `env` values), so it is written in an owner-only (`0700`) temp dir with `0600` permissions. To keep a
-bearer token off disk entirely, express it as `$env:VAR` (via the policy's `auth.bearerTokenEnv`, or a
-`$env:`-valued header from the client) — pi-mcp-adapter resolves `$env:` at connect, so only the
+bearer token off disk entirely, express it as `${VAR}` (via the policy's `auth.bearerTokenEnv`, or a
+`${VAR}`-valued header from the client) — pi resolves `${VAR}` when it connects, so only the
 placeholder is written.
 
-pi-acp deliberately **does not** write `<cwd>/.pi/mcp.json`. That path is pi's own highest-precedence
-project config namespace (settings, prompts, trust, mcp): writing there overrode the user's global
-MCP config, persisted past the session, and leaked into unrelated (even non-ACP) pi sessions launched
-from the same directory. `--mcp-config` overrides only pi-mcp-adapter's `pi-global` source, never pi's
-config dir, so all of pi's own MCP config (global and project) still flows through. A stale
-`<cwd>/.pi/mcp.json` left by an older pi-acp version (marked `_generatedBy: pi-acp`) is cleaned up
-automatically.
+pi-acp deliberately **does not** write `<cwd>/.pi/mcp.json`. That path is pi's own project config
+namespace (settings, prompts, trust, mcp): writing there persisted past the session and leaked into
+unrelated (even non-ACP) pi sessions launched from the same directory. A stale `<cwd>/.pi/mcp.json`
+left by an older pi-acp version (marked `_generatedBy: pi-acp`) is cleaned up automatically.
 
 ### MCP generation policy
 
-By default pi-acp generates every ACP-provided server into the temp overlay (additive — it never
-overrides your own config). To control which servers it generates — same semantics pi uses for
+By default pi-acp registers every ACP-provided server (additive — it never overrides your own
+config). To control which servers it generates — same semantics pi uses for
 subagent tool/extension inheritance — create `~/.pi/pi-acp/mcp-policy.json` (under `PI_ACP_DATA_DIR`):
 
 ```json
@@ -474,12 +478,12 @@ subagent tool/extension inheritance — create `~/.pi/pi-acp/mcp-policy.json` (u
 }
 ```
 
-- **`generate`** — which servers pi-acp may write: `true`/`"*"`/omitted = all (default) · `["a","b"]` =
-  only those · `false` = none. Servers not generated are left to your own (lower-precedence) config.
-- **`exclude`** — denylist (wins over `generate`): never generate these. Use it for a server you
-  configure globally with its own auth (e.g. a bearer-auth'd combiner) so pi-acp doesn't override it.
-- **`auth`** — for a server pi-acp _does_ generate, write `Authorization: Bearer $env:<VAR>` (+ extra
-  headers). pi-mcp-adapter interpolates `$env:` at connect, so the token is never written to disk.
+- **`generate`** — which servers pi-acp may register: `true`/`"*"`/omitted = all (default) ·
+  `["a","b"]` = only those · `false` = none.
+- **`exclude`** — denylist (wins over `generate`): never register these, e.g. a client server you
+  don't want in pi at all.
+- **`auth`** — for a server pi-acp _does_ register, write `Authorization: Bearer ${<VAR>}` (+ extra
+  headers). pi resolves `${VAR}` when it connects, so the token is never written to disk.
 
 Names are case-insensitive. Note the ACP MCP shape has no dedicated auth field, so bearer auth can
 only travel as an HTTP header — either provided by the client in the server's `headers`, or added via

@@ -1,10 +1,11 @@
 /**
  * Human-readable titles for ACP tool calls.
  *
- * Pi surfaces MCP tools through gateway/proxy tools whose bare names tell
- * clients like Zed nothing ("mcp", "mcpScript", "mcp__<server>"). Derive a
- * clearer title from the call arguments, mirroring the per-tool naming used
- * when MCP tools are registered individually (e.g. "slack_slack_search_public").
+ * Pi's built-in MCP support names tools `mcp__<server>__<tool>` and runs
+ * scripts through `codemode`; pi-mcp-adapter used gateway/proxy tools whose
+ * bare names tell clients like Zed nothing ("mcp", "mcpScript",
+ * "mcp__<server>"). Derive a clearer title from the tool name and arguments:
+ * `server/tool` like Pi's own renderer, or the first statement of a script.
  */
 
 /** Upper bound for a derived title; clients truncate long titles anyway. */
@@ -16,7 +17,7 @@ function truncate(text: string, max = MAX_TITLE_LENGTH): string {
   return `${flat.slice(0, max - 1)}…`
 }
 
-/** First meaningful statement of an mcpScript code blob, for a short title. */
+/** First meaningful statement of a codemode/mcpScript code blob, for a short title. */
 function scriptHint(code: string): string | undefined {
   let skippingMeta = false
   for (const rawLine of code.split('\n')) {
@@ -24,6 +25,8 @@ function scriptHint(code: string): string | undefined {
     if (!line || line.startsWith('//')) continue
     // Workflow scripts almost always start with a boilerplate meta block;
     // skip the whole statement, not just its first line.
+    // codemode's optional first line sets run options, not intent.
+    if (line.startsWith('// @options:')) continue
     if (!skippingMeta && line.startsWith('export const meta')) {
       skippingMeta = !line.endsWith('}')
       continue
@@ -82,7 +85,18 @@ export function toolCallTitle(toolName: string, args: any): string {
   if (toolName === 'get_subagent_result' && typeof args?.agent_id === 'string') {
     return truncate(`Result: ${args.agent_id}`)
   }
-  // Namespace proxies ("mcp__<server>"): args.tool is the server-local tool name.
+  // Built-in MCP tools ("mcp__<server>__<tool>"): show "server/tool", as Pi's renderer does.
+  const builtin = /^mcp__(.+?)__(.+)$/.exec(toolName)
+  if (builtin) return truncate(`${builtin[1]}/${builtin[2]}`)
+
+  // Built-in codemode: show the first meaningful statement of the script.
+  if (toolName === 'codemode') {
+    const code = args && typeof args === 'object' && typeof args.code === 'string' ? args.code : ''
+    const hint = code ? scriptHint(code) : undefined
+    return truncate(hint ? `codemode: ${hint}` : 'codemode')
+  }
+
+  // pi-mcp-adapter namespace proxies ("mcp__<server>"): args.tool is the server-local tool name.
   if (toolName.startsWith('mcp__')) {
     const server = toolName.slice('mcp__'.length)
     const inner = args && typeof args === 'object' && typeof args.tool === 'string' ? args.tool : undefined
@@ -90,7 +104,7 @@ export function toolCallTitle(toolName: string, args: any): string {
     return truncate(toolName)
   }
 
-  // Gateway proxy ("mcp"): args.tool is the fully-qualified tool name;
+  // pi-mcp-adapter gateway proxy ("mcp"): args.tool is the fully-qualified tool name;
   // otherwise the call is one of the gateway's meta-actions.
   if (toolName === 'mcp') {
     if (args && typeof args === 'object' && typeof args.tool === 'string' && args.tool) {

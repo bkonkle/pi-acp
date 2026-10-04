@@ -8,7 +8,8 @@ import {
   translateMcpServers,
   writeMcpConfig,
   loadMcpPolicy,
-  cleanupStaleGeneratedConfig
+  cleanupStaleGeneratedConfig,
+  toPiServerName
 } from '../../src/acp/mcp-config.js'
 
 function tmpCwd(): string {
@@ -143,7 +144,7 @@ test('policy: generate:false writes nothing (all preserved)', () => {
   assert.deepEqual(preserved, ['a'])
 })
 
-test('policy.auth: bearerTokenEnv → writes a $env: Authorization header (no secret on disk)', () => {
+test('policy.auth: bearerTokenEnv → writes a ${VAR} Authorization header (no secret on disk)', () => {
   const servers: McpServer[] = [
     { type: 'http', name: 'foo', url: 'http://localhost:1/mcp', headers: [{ name: 'X-Session', value: 'tok' }] }
   ]
@@ -151,7 +152,7 @@ test('policy.auth: bearerTokenEnv → writes a $env: Authorization header (no se
     auth: { foo: { bearerTokenEnv: 'FOO_TOKEN', headers: { 'X-Extra': 'e' } } }
   })
   const entry = config.mcpServers.foo as { url: string; headers: Record<string, string> }
-  assert.equal(entry.headers['Authorization'], 'Bearer $env:FOO_TOKEN')
+  assert.equal(entry.headers['Authorization'], 'Bearer ${FOO_TOKEN}')
   assert.equal(entry.headers['X-Extra'], 'e')
   assert.equal(entry.headers['X-Session'], 'tok') // client header preserved
 })
@@ -182,4 +183,14 @@ test('loadMcpPolicy: parses generate/exclude/auth; missing file → {}', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('translateMcpServers: client display names become pi-safe server names', () => {
+  const servers: McpServer[] = [
+    { name: 'Chrome DevTools', command: 'npx', args: [], env: [] },
+    { type: 'http', name: '  !!! ', url: 'http://localhost:1/mcp', headers: [] }
+  ]
+  const { config } = translateMcpServers(servers)
+  assert.deepEqual(Object.keys(config.mcpServers), ['Chrome-DevTools'])
+  assert.equal(toPiServerName('my.server/v2'), 'my-server-v2')
 })
