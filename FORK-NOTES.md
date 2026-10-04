@@ -51,6 +51,32 @@ RPC smoke verifies native status rows, a full transcript larger than the old lim
 
 Source contract: https://github.com/zed-industries/zed/blob/v1.21.0/crates/acp_thread/src/acp_thread.rs#L1261-L1264
 
+## 2026-10-02: pi 1.0 built-in MCP and codemode
+
+Pi 0.99 added built-in MCP support and `codemode`; pi 1.0 is the first release this fork targets
+with them. Three adapter changes:
+
+- **Client MCP servers.** `--mcp-config` was a pi-mcp-adapter flag. Pi 1.0 has no such flag and
+  ignores unknown flags in RPC mode, so ACP `mcpServers` were silently dropped. The translated temp
+  file is now passed in `PI_ACP_MCP_CONFIG`, and the bundled `src/extensions/acp-mcp.ts` registers
+  each entry with `pi.registerMcpServer()`. Registrations are per process; a same-named server in
+  the user's `mcp.json` wins. Bearer placeholders use pi's `${VAR}` instead of the adapter's
+  `$env:VAR`, and client display names are made pi-safe (`[A-Za-z0-9_-]`). Verified end to end
+  with pi 1.0.0 in RPC mode: a stdio server from the env file was called from codemode.
+- **Codemode inner calls.** Tools called through `ctx.executeTool()` emit `tool_execution_*` events
+  with `parentToolCallId` and ids like `<parent>/<n>`. The adapter turned each into its own Zed card
+  (a bash call even got a terminal), and none of them exist in the transcript, so they disappeared on
+  reload. Those events are now skipped. `toolResultToText` formats codemode's `details.calls` as a
+  status list (latest 20, like Pi's renderer) followed by the script output without its
+  "Script completed" header. Before, a running codemode card showed raw JSON, because its partial
+  results have empty `content`.
+- **Titles.** `mcp__<server>__<tool>` → `server/tool` (Pi's own rendering); `codemode` → first
+  meaningful statement of the script, skipping the `// @options:` line. The pi-mcp-adapter branches
+  (`mcp`, `mcpScript`, `mcp__<server>`) stay for older setups.
+
+Tests: `test/unit/acp-mcp-extension.test.ts`, codemode cases in `pi-tools`, `tool-title`, and
+`session-events` (event order captured from pi 1.0.0 RPC output).
+
 ## 2026-09-23: no double server prefix in tool-call titles
 
 Problem: MCP tool calls showed doubled server prefixes in Zed —

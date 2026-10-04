@@ -61,7 +61,7 @@ type SessionCreateParams = {
   piCommand?: string
   /** ACP additionalDirectories: extra workspace roots beyond cwd (absolute paths). */
   additionalDirectories?: string[]
-  /** Path to the generated MCP config temp file, passed to pi via `--mcp-config`. */
+  /** Path to the generated MCP config temp file, passed to pi in `PI_ACP_MCP_CONFIG`. */
   mcpConfigPath?: string
   /** Cleanup for the generated MCP config temp file, invoked when the session is closed. */
   mcpConfigCleanup?: () => void
@@ -95,6 +95,12 @@ const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
 ]
 const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
 const CHOICE_OPTION_PREFIX = 'choice-'
+
+/** A `tool_execution_*` event for a call another tool made (pi >= 0.99 sets `parentToolCallId`). */
+function isNestedToolEvent(ev: PiRpcEvent): boolean {
+  const parent = (ev as { parentToolCallId?: unknown }).parentToolCallId
+  return typeof parent === 'string' && parent.length > 0
+}
 
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
@@ -1027,6 +1033,10 @@ export class PiAcpSession {
       }
 
       case 'tool_execution_start': {
+        // Calls a tool made through `ctx.executeTool()` (e.g. codemode scripts) carry
+        // `parentToolCallId`. They are not model tool calls and never appear in the transcript, so
+        // separate cards would vanish on reload; the parent's card lists them instead.
+        if (isNestedToolEvent(ev)) break
         const toolCallId = String((ev as any).toolCallId ?? crypto.randomUUID())
         const toolName = String((ev as any).toolName ?? 'tool')
         const args = (ev as any).args
@@ -1110,6 +1120,7 @@ export class PiAcpSession {
       }
 
       case 'tool_execution_update': {
+        if (isNestedToolEvent(ev)) break
         const toolCallId = String((ev as any).toolCallId ?? '')
         if (!toolCallId) break
 
@@ -1137,6 +1148,7 @@ export class PiAcpSession {
       }
 
       case 'tool_execution_end': {
+        if (isNestedToolEvent(ev)) break
         const toolCallId = String((ev as any).toolCallId ?? '')
         if (!toolCallId) break
 

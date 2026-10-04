@@ -4,7 +4,7 @@ import { defineConfig } from 'tsup'
 // entries so the adapter can load them into spawned `pi` processes via `-e <path>` (see
 // src/pi-rpc/process.ts). Keep external runtime dependencies out; owned helpers are bundled.
 export default defineConfig({
-  entry: ['src/index.ts', 'src/pi-extension.ts', 'src/extensions/todo-acp.ts'],
+  entry: ['src/index.ts', 'src/pi-extension.ts', 'src/extensions/todo-acp.ts', 'src/extensions/acp-mcp.ts'],
   format: ['esm'],
   platform: 'node',
   target: 'node22',

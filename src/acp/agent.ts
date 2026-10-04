@@ -216,7 +216,7 @@ export class PiAcpAgent implements ACPAgent {
 
       const cwd = opts?.cwd ?? stored.cwd
 
-      // Write a session-scoped temp MCP config (passed via `--mcp-config`) when the client supplied
+      // Write a session-scoped temp MCP config (read by the bundled acp-mcp extension) when the client supplied
       // MCP servers (session/load, session/resume). Plain restores (e.g. lazy restore on prompt)
       // carry no servers and generate nothing. Also clean up a stale generated `<cwd>/.pi/mcp.json`.
       cleanupStaleGeneratedConfig(cwd)
@@ -295,8 +295,8 @@ export class PiAcpAgent implements ACPAgent {
       }),
       agentCapabilities: {
         loadSession: true,
-        // stdio is the baseline (no flag); http servers are translated into pi-mcp-adapter
-        // config. sse/acp cannot be expressed in that config shape.
+        // stdio is the baseline (no flag); http servers are registered with pi's built-in MCP
+        // support, which speaks streamable HTTP. sse/acp are not supported by pi.
         mcpCapabilities: { http: true, sse: false },
         promptCapabilities: {
           image: true,
@@ -328,8 +328,8 @@ export class PiAcpAgent implements ACPAgent {
     const fileCommands = loadSlashCommands(params.cwd)
     const enableSkillCommands = getEnableSkillCommands(params.cwd)
 
-    // Translate ACP mcpServers into a session-scoped temp MCP config passed to pi via `--mcp-config`
-    // (written before create() so it exists before pi starts). Also clean up any stale
+    // Translate ACP mcpServers into a session-scoped temp MCP config that the bundled acp-mcp
+    // extension registers (written before create() so it exists before pi starts). Also clean up any stale
     // `<cwd>/.pi/mcp.json` a previous pi-acp version generated, so it can't win at highest precedence.
     cleanupStaleGeneratedConfig(params.cwd)
     const mcpWrite = writeMcpConfig(params.mcpServers)
