@@ -1,4 +1,5 @@
 import { toolCallTitle } from '../tool-title.js'
+import { codeBlock, inlineCode } from './markdown.js'
 
 /** Inner calls shown in a codemode card; Pi's own renderer also keeps only the latest ones. */
 export const CODEMODE_CALL_PREVIEW = 20
@@ -11,7 +12,7 @@ const CODEMODE_STATUS_ICONS: Record<string, string> = {
   unfinished: '?'
 }
 // codemode prefixes its output with this header; Pi's renderer drops it too.
-const CODEMODE_HEADER = /^Script completed\nWall time [^\n]*\nOutput:\n?$/
+const CODEMODE_HEADER = /^Script (?:completed|failed)\nWall time [^\n]*\nOutput:\n?$/
 
 type CodemodeCall = {
   id?: string
@@ -39,19 +40,21 @@ function formatDuration(ms: unknown): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`
 }
 
-function formatCodemodeCall(call: CodemodeCall): string {
+function formatCodemodeCall(call: CodemodeCall, markdown = false): string {
   const args =
     typeof call.args === 'string' ? call.args : call.arguments === undefined ? '' : JSON.stringify(call.arguments)
   const shortArgs = args.length > CODEMODE_ARGS_CHARS ? `${args.slice(0, CODEMODE_ARGS_CHARS - 3)}...` : args
-  const parts = [CODEMODE_STATUS_ICONS[call.status], toolCallTitle(call.name, undefined)]
-  if (shortArgs) parts.push(shortArgs)
+  const name = toolCallTitle(call.name, undefined)
+  const parts = [CODEMODE_STATUS_ICONS[call.status], markdown ? inlineCode(name) : name]
+  if (shortArgs) parts.push(markdown ? inlineCode(shortArgs) : shortArgs)
   const duration = formatDuration(call.durationMs)
   if (duration) parts.push(duration)
   let line = parts.join(' ')
   if (call.status === 'error' && typeof call.error === 'string' && call.error) {
-    line += `\n    ${call.error.split('\n').slice(0, 3).join('\n    ')}`
+    const error = call.error.split('\n').slice(0, 3).join('\n')
+    line += markdown ? `\n\n${codeBlock(error)}` : `\n    ${error.replace(/\n/g, '\n    ')}`
   }
-  return line
+  return markdown ? `- ${line}` : line
 }
 
 /**
@@ -59,13 +62,13 @@ function formatCodemodeCall(call: CodemodeCall): string {
  * without its "Script completed" header. The inner calls are not separate ACP tool calls (see the
  * `parentToolCallId` handling in session.ts), so this list is where they show up.
  */
-function codemodeResultText(result: any, calls: CodemodeCall[], incomplete = false): string {
+function codemodeResultText(result: any, calls: CodemodeCall[], incomplete = false, markdown = false): string {
   const sections: string[] = []
   if (calls.length) {
     const shown = calls.slice(-CODEMODE_CALL_PREVIEW)
-    const lines = shown.map(formatCodemodeCall)
+    const lines = shown.map(call => formatCodemodeCall(call, markdown))
     if (shown.length < calls.length) lines.unshift(`... (${calls.length - shown.length} earlier calls)`)
-    sections.push(lines.join('\n'))
+    sections.push(lines.join(markdown ? '\n\n' : '\n'))
   }
   if (incomplete) sections.push('(incomplete nested-call record)')
   const content = Array.isArray(result?.content) ? result.content : []
@@ -74,7 +77,19 @@ function codemodeResultText(result: any, calls: CodemodeCall[], incomplete = fal
     .filter(Boolean)
   if (texts.length && CODEMODE_HEADER.test(texts[0])) texts.shift()
   const output = texts.join('\n').trim()
-  if (output) sections.push(output)
+  if (output) {
+    let formatted = output
+    let language = ''
+    if (markdown) {
+      try {
+        formatted = JSON.stringify(JSON.parse(output), null, 2)
+        language = 'json'
+      } catch {
+        // Non-JSON output stays literal, including Markdown and script errors.
+      }
+    }
+    sections.push(markdown ? codeBlock(formatted, language) : output)
+  }
   return sections.join('\n\n')
 }
 
@@ -89,7 +104,7 @@ export function needsNestedCallSummary(result: unknown): boolean {
   return nested.some(call => !ids.has(call.id))
 }
 
-export function toolResultToText(result: unknown): string {
+export function toolResultToText(result: unknown, format: 'plain' | 'markdown' = 'plain'): string {
   if (!result) return ''
 
   const details = (result as any)?.details
@@ -97,19 +112,23 @@ export function toolResultToText(result: unknown): string {
   const nested = codemodeCalls(recorded)
   const own = codemodeCalls(details)
   if (own) {
-    if (!nested) return codemodeResultText(result, own)
+    if (!nested) return codemodeResultText(result, own, false, format === 'markdown')
     // Keep codemode's richer status/argument previews, add deeper calls from Pi's durable record,
     // and retain model calls that do not pass through ctx.executeTool().
     const byId = new Map(own.map(call => [call.id, call]))
     const ids = new Set(nested.map(call => call.id))
     const calls = [...nested.map(call => byId.get(call.id) ?? call), ...own.filter(call => !ids.has(call.id))]
-    return codemodeResultText(result, calls, recorded?.complete === false)
+    return codemodeResultText(result, calls, recorded?.complete === false, format === 'markdown')
   }
   if (nested) {
     const body = { ...(result as Record<string, unknown>) }
     delete body.nestedCalls
-    const text = plainToolResultToText(body, '\n')
-    return codemodeResultText({ content: [{ type: 'text', text }] }, nested, recorded?.complete === false)
+    const first = Array.isArray(body.content) ? body.content[0] : undefined
+    const content =
+      first?.type === 'text' && CODEMODE_HEADER.test(first.text)
+        ? body.content
+        : [{ type: 'text', text: plainToolResultToText(body, '\n') }]
+    return codemodeResultText({ content }, nested, recorded?.complete === false, format === 'markdown')
   }
   return plainToolResultToText(result)
 }

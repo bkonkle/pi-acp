@@ -90,6 +90,7 @@ test('toolResultToText: codemode failure keeps partial output separate from its 
     details: { calls: [{ id: 'c/1', name: 'read', status: 'cancelled' }] }
   })
   assert.match(text, /⊘ read/)
+  assert.doesNotMatch(text, /Script failed|Wall time/)
   assert.match(text, /partial output\nScript error:\nAborted$/)
 })
 
@@ -128,4 +129,6 @@ test('durable nested-call summaries retain deeper calls without duplicating code
   const withoutDetails = { ...result, details: undefined }
   assert.equal(needsNestedCallSummary(withoutDetails), true)
   assert.match(toolResultToText(withoutDetails), /✗ delegate/)
+  const diff = '--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new'
+  assert.ok(toolResultToText({ ...withoutDetails, details: { diff } }).endsWith(diff))
 })

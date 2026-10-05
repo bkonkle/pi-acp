@@ -30,6 +30,7 @@ import {
   isBashTool
 } from './translate/bash.js'
 import { needsNestedCallSummary, toolResultToText } from './translate/pi-tools.js'
+import { codemodeContent, codemodeDisplayInput } from './translate/codemode.js'
 import { compactSubagentText, isSubagentInvocationTool, subagentDisplayInput } from './translate/subagent-tools.js'
 import { getDefaultModel, getPiAcpDebug } from './pi-acp-settings.js'
 import {
@@ -349,6 +350,7 @@ export class PiAcpSession {
   private lastToolCallTitles = new Map<string, string>()
   private bashOutputSnapshots = new Map<string, string>()
   private readonly compactSubagentToolCalls = new Set<string>()
+  private readonly codemodeToolCalls = new Set<string>()
 
   // ACP messageId grouping: chunks belonging to the same assistant message share a messageId.
   // pi's `message_start` event begins a new message; the id is assigned lazily on first chunk.
@@ -687,6 +689,7 @@ export class PiAcpSession {
     this.bashOutputSnapshots.delete(toolCallId)
     this.lastToolCallTitles.delete(toolCallId)
     this.compactSubagentToolCalls.delete(toolCallId)
+    this.codemodeToolCalls.delete(toolCallId)
     this.hiddenAgentToolCalls.delete(toolCallId)
     this.agentInputs.delete(toolCallId)
   }
@@ -980,7 +983,9 @@ export class PiAcpSession {
               break
             }
             if (isSubagentInvocationTool(toolName)) this.compactSubagentToolCalls.add(toolCallId)
-            const displayInput = subagentDisplayInput(toolName, rawInput)
+            if (toolName === 'codemode') this.codemodeToolCalls.add(toolCallId)
+            const displayInput =
+              toolName === 'codemode' ? codemodeDisplayInput(rawInput) : subagentDisplayInput(toolName, rawInput)
             const locations = toToolCallLocations(rawInput, this.cwd)
             const existingStatus = this.currentToolCalls.get(toolCallId)
             // IMPORTANT: never downgrade status (e.g. if we already marked in_progress via tool_execution_start).
@@ -1045,6 +1050,8 @@ export class PiAcpSession {
           break
         }
         if (isSubagentInvocationTool(toolName)) this.compactSubagentToolCalls.add(toolCallId)
+        if (toolName === 'codemode') this.codemodeToolCalls.add(toolCallId)
+        const displayInput = toolName === 'codemode' ? codemodeDisplayInput(args) : subagentDisplayInput(toolName, args)
         let line: number | undefined
 
         if (isBashTool(toolName)) {
@@ -1102,7 +1109,7 @@ export class PiAcpSession {
             kind: toToolKind(toolName),
             status: 'in_progress',
             locations,
-            rawInput: subagentDisplayInput(toolName, args)
+            rawInput: displayInput
           })
         } else {
           this.currentToolCalls.set(toolCallId, 'in_progress')
@@ -1112,7 +1119,7 @@ export class PiAcpSession {
             ...this.titleUpdate(toolCallId, toolName, args),
             status: 'in_progress',
             locations,
-            rawInput: subagentDisplayInput(toolName, args)
+            rawInput: displayInput
           })
         }
 
@@ -1132,6 +1139,15 @@ export class PiAcpSession {
         }
 
         const compact = this.compactSubagentToolCalls.has(toolCallId)
+        if (this.codemodeToolCalls.has(toolCallId)) {
+          this.emit({
+            sessionUpdate: 'tool_call_update',
+            toolCallId,
+            status: 'in_progress',
+            content: codemodeContent(partial)
+          })
+          break
+        }
         const output = this.fileMutationToolCallIds.has(toolCallId) ? '' : toolResultToText(partial)
         const text = compact ? compactSubagentText(output) : output
 
@@ -1169,6 +1185,16 @@ export class PiAcpSession {
           break
         }
 
+        if (this.codemodeToolCalls.has(toolCallId)) {
+          this.emit({
+            sessionUpdate: 'tool_call_update',
+            toolCallId,
+            status: isError ? 'failed' : 'completed',
+            content: codemodeContent(result)
+          })
+          this.cleanupToolCall(toolCallId)
+          break
+        }
         const compact = this.compactSubagentToolCalls.has(toolCallId)
         const output = toolResultToText(result)
         const text = compact ? compactSubagentText(output) : output
@@ -1323,8 +1349,13 @@ export class PiAcpSession {
               sessionUpdate: 'tool_call_update',
               toolCallId,
               status: message.isError ? 'failed' : 'completed',
-              content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
-              rawOutput: message
+              content:
+                toolName === 'codemode'
+                  ? codemodeContent(message)
+                  : text
+                    ? [{ type: 'content', content: { type: 'text', text } }]
+                    : null,
+              ...(toolName === 'codemode' ? {} : { rawOutput: message })
             })
           }
         }
@@ -1709,6 +1740,7 @@ function toToolKind(toolName: string): ToolKind {
     case 'edit':
       return 'edit'
     case 'bash':
+    case 'codemode':
       return 'execute'
     default:
       return 'other'

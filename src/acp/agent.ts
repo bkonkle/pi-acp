@@ -37,6 +37,8 @@ import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText } from './translate/pi-tools.js'
+import { codemodeContent, codemodeDisplayInput } from './translate/codemode.js'
+import { toolCallTitle } from './tool-title.js'
 import { compactSubagentText, isSubagentInvocationTool } from './translate/subagent-tools.js'
 import {
   bashCommand,
@@ -1001,6 +1003,7 @@ export class PiAcpAgent implements ACPAgent {
     // Replay full conversation history.
     const data = (await proc.getMessages()) as any
     const messages = Array.isArray(data?.messages) ? data.messages : []
+    const toolInputs = new Map<string, unknown>()
 
     for (const m of messages) {
       const role = String(m?.role ?? '')
@@ -1019,6 +1022,13 @@ export class PiAcpAgent implements ACPAgent {
       }
 
       if (role === 'assistant') {
+        if (Array.isArray(m?.content)) {
+          for (const block of m.content) {
+            if (block?.type === 'toolCall' && typeof block.id === 'string') {
+              toolInputs.set(block.id, block.arguments)
+            }
+          }
+        }
         const text = normalizePiAssistantText(m?.content)
         if (text) {
           await this.conn.sessionUpdate({
@@ -1035,6 +1045,8 @@ export class PiAcpAgent implements ACPAgent {
         const toolName = String((m as any)?.toolName ?? 'tool')
         const toolCallId = String((m as any)?.toolCallId ?? crypto.randomUUID())
         const isError = Boolean((m as any)?.isError)
+        const args = toolInputs.get(toolCallId) ?? m.args
+        toolInputs.delete(toolCallId)
         const isBash = isBashTool(toolName)
         if (toolName === 'Agent' && session.hasTrackedSubagentInvocation(toolCallId, m)) continue
 
@@ -1091,17 +1103,24 @@ export class PiAcpAgent implements ACPAgent {
         }
 
         const compact = isSubagentInvocationTool(toolName)
+        const isCodemode = toolName === 'codemode'
         // Create a synthetic ACP tool call to render historic tool usage.
         await this.conn.sessionUpdate({
           sessionId: session.sessionId,
           update: {
             sessionUpdate: 'tool_call',
             toolCallId,
-            title: toolName,
-            kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
-            status: 'completed',
-            rawInput: null,
-            ...(compact ? {} : { rawOutput: m })
+            title: toolCallTitle(toolName, args),
+            kind: isCodemode
+              ? 'execute'
+              : toolName === 'read'
+                ? 'read'
+                : toolName === 'write' || toolName === 'edit'
+                  ? 'edit'
+                  : 'other',
+            status: isError ? 'failed' : 'completed',
+            rawInput: isCodemode ? codemodeDisplayInput(args) : null,
+            ...(compact || isCodemode ? {} : { rawOutput: m })
           }
         })
 
@@ -1113,8 +1132,12 @@ export class PiAcpAgent implements ACPAgent {
             sessionUpdate: 'tool_call_update',
             toolCallId,
             status: isError ? 'failed' : 'completed',
-            content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
-            ...(compact ? {} : { rawOutput: m })
+            content: isCodemode
+              ? codemodeContent(m)
+              : text
+                ? [{ type: 'content', content: { type: 'text', text } }]
+                : null,
+            ...(compact || isCodemode ? {} : { rawOutput: m })
           }
         })
       }

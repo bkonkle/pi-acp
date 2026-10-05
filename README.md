@@ -41,8 +41,10 @@ On top of upstream it adds (including George Harker's changes):
   keep the cancel-with-note fallback.
 - **MCP auto-configuration** — ACP `mcpServers` are registered with pi's built-in MCP support
   (Pi 1.0+) for the session. See [MCP servers](#mcp-servers).
-- **Codemode cards** — a `codemode` call is one card listing the tools its script called, with
-  their status, followed by the script output. Calls made inside the script are not separate cards.
+- **Codemode cards** — one expandable execution card per script, with operation titles such as
+  “Read files” or “Search tools,” syntax-highlighted JavaScript input, compact inner-call status,
+  and literal output (JSON is pretty-printed). Images and failure output remain visible. Reopening
+  a thread restores its script input and title; calls inside the script stay in the parent card.
   Pi's durable nested-call records preserve deeper calls and non-codemode parent summaries on
   completion and history replay.
 - **Multi-root workspaces** — additional workspace roots on `session/new` / `session/load`

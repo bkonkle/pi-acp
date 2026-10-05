@@ -5,7 +5,7 @@
  * scripts through `codemode`; pi-mcp-adapter used gateway/proxy tools whose
  * bare names tell clients like Zed nothing ("mcp", "mcpScript",
  * "mcp__<server>"). Derive a clearer title from the tool name and arguments:
- * `server/tool` like Pi's own renderer, or the first statement of a script.
+ * `server/tool` like Pi's own renderer, or the operations in a script.
  */
 
 /** Upper bound for a derived title; clients truncate long titles anyway. */
@@ -38,6 +38,32 @@ function scriptHint(code: string): string | undefined {
     return line
   }
   return undefined
+}
+
+/** Describe operations, ignoring comments and quoted source rather than exposing JavaScript as a title. */
+function codemodeTitle(code: string): string {
+  const tokens =
+    /\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b(tools\.[\w$]+|models\.[\w$]+|searchTools|describeTool|describeNamespace)\s*\(/g
+  const operations = new Set<string>()
+  const labels: Record<string, string> = {
+    'tools.read': 'Read files',
+    'tools.edit': 'Edit files',
+    'tools.write': 'Write files',
+    'tools.bash': 'Run shell commands',
+    'tools.web_search': 'Search the web',
+    'tools.fetch_content': 'Fetch content',
+    searchTools: 'Search tools',
+    describeTool: 'Describe tools',
+    describeNamespace: 'Describe tools',
+    'models.classify': 'Classify',
+    'models.generateImages': 'Generate images'
+  }
+  for (const match of code.matchAll(tokens)) {
+    const operation = match[1]
+    if (!operation) continue
+    operations.add(labels[operation] ?? `Run ${toolCallTitle(operation.replace(/^tools\./, ''), undefined)}`)
+  }
+  return operations.size ? [...operations].join(' · ') : 'Run JavaScript'
 }
 
 /** Short fragment for the mcp gateway's meta-actions (search/describe/connect/...). */
@@ -89,11 +115,9 @@ export function toolCallTitle(toolName: string, args: any): string {
   const builtin = /^mcp__(.+?)__(.+)$/.exec(toolName)
   if (builtin) return truncate(`${builtin[1]}/${builtin[2]}`)
 
-  // Built-in codemode: show the first meaningful statement of the script.
   if (toolName === 'codemode') {
     const code = args && typeof args === 'object' && typeof args.code === 'string' ? args.code : ''
-    const hint = code ? scriptHint(code) : undefined
-    return truncate(hint ? `codemode: ${hint}` : 'codemode')
+    return truncate(codemodeTitle(code))
   }
 
   // pi-mcp-adapter namespace proxies ("mcp__<server>"): args.tool is the server-local tool name.

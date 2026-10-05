@@ -61,12 +61,20 @@ test('toolCallTitle: built-in mcp__<server>__<tool> → server/tool', () => {
   assert.equal(toolCallTitle('mcp__datadog_cost__list_datadog_skills', {}), 'datadog_cost/list_datadog_skills')
 })
 
-test('toolCallTitle: codemode shows the first statement, skipping the @options line', () => {
-  const code =
-    '// @options: {"timeout_ms": 60000}\n\nconst { issues } = await tools.mcp__linear__list_issues({})\nreturn issues'
-  assert.equal(
-    toolCallTitle('codemode', { code }),
-    'codemode: const { issues } = await tools.mcp__linear__list_issues({})'
-  )
-  assert.equal(toolCallTitle('codemode', {}), 'codemode')
+test('toolCallTitle: codemode summarizes distinct operations without treating quoted code as activity', () => {
+  const code = [
+    '// @options: {"timeout_ms": 60000}',
+    '// tools.write({})',
+    '/* tools.edit({}) */',
+    'text("tools.bash({})")',
+    "text('tools.web_search({})')",
+    'text(`tools.fetch_content({})`)',
+    'const { issues } = await tools.mcp__linear__list_issues({})',
+    'await Promise.all([tools.read({path: "a"}), tools.read({path: "b"})])',
+    'return issues'
+  ].join('\n')
+  assert.equal(toolCallTitle('codemode', { code }), 'Run linear/list_issues · Read files')
+  assert.equal(toolCallTitle('codemode', { code: 'return await searchTools("notion")' }), 'Search tools')
+  assert.equal(toolCallTitle('codemode', { code: 'return 42' }), 'Run JavaScript')
+  assert.equal(toolCallTitle('codemode', {}), 'Run JavaScript')
 })

@@ -1264,10 +1264,16 @@ test('PiAcpSession: codemode inner calls stay inside the codemode card', async (
     'no separate cards for nested calls'
   )
   assert.equal(updates[0].sessionUpdate, 'tool_call')
-  assert.equal(updates[0].title, 'codemode: const a = await tools.bash({command:"echo one"})')
-  assert.equal(updates[1].content[0].content.text, '… bash {"command":"echo one"}')
+  assert.equal(updates[0].title, 'Run shell commands')
+  assert.equal(updates[0].kind, 'execute')
+  assert.equal(updates[0].rawInput, `\`\`\`javascript\n${code}\n\`\`\``)
+  assert.equal(updates[1].content[0].content.text, '- … ` bash ` ` {"command":"echo one"} `')
   assert.equal(updates[2].status, 'completed')
-  assert.equal(updates[2].content[0].content.text, '✓ bash {"command":"echo one"} 16ms\n\n"one\\n"')
+  assert.equal(
+    updates[2].content[0].content.text,
+    '- ✓ ` bash ` ` {"command":"echo one"} ` 16ms\n\n```json\n"one\\n"\n```'
+  )
+  assert.ok(updates.every(update => update.rawOutput === undefined))
 
   proc.emit({
     type: 'message_end',

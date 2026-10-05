@@ -1,5 +1,22 @@
 Fork of georgeharker/pi-acp. Local patches:
 
+## Zed-style codemode presentation
+
+Codemode uses a single expandable execution card with operation-based titles (for example,
+“Read files” or “Run notion/fetch”) instead of a generic hammer row or a JavaScript statement.
+Script input is fenced JavaScript rather than JSON-wrapped arguments. Inner calls are a compact
+Markdown status list; script output is fenced literal text, with JSON pretty-printed. Fence lengths
+account for backticks in source/output. Images stay separate ACP image blocks, failed scripts keep
+partial output and errors, and empty progress does not show a raw JSON result object.
+
+History replay pairs assistant tool-call IDs with results to restore input and derived titles;
+Pi's tool-result messages do not contain the original arguments. Both live and replay paths omit
+redundant raw result dumps for codemode. Durable deeper-call summaries use the same presentation.
+Inner calls still do not create standalone cards or fake terminals.
+
+The local checkout moved to `~/code/bkonkle/pi-acp`; Zed's custom agent launch path must point to
+that checkout's `dist/index.js`. Rebuild and restart the Pi agent in Zed to load adapter changes.
+
 ## Native status plus expandable subagent details (stock Zed)
 
 The header-only approach below matched Zed's native status styling but could not expand without
