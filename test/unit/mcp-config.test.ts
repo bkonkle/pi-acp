@@ -2,8 +2,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { McpServer } from '@agentclientprotocol/sdk'
+import registerAcpMcp, { MCP_CONFIG_ENV } from '../../src/extensions/acp-mcp.js'
 import {
   translateMcpServers,
   writeMcpConfig,
@@ -56,28 +57,44 @@ test('translateMcpServers: sse/acp are skipped, not translated', () => {
   assert.deepEqual(config.mcpServers, {})
 })
 
-test('writeMcpConfig: writes a session-scoped temp file (NOT <cwd>/.pi) and cleanup removes it', () => {
+test('writeMcpConfig: native bridge round-trips a private session overlay and cleanup removes it', () => {
   const cwd = tmpCwd()
   try {
-    const servers: McpServer[] = [{ name: 'chrome', command: 'npx', args: [], env: [] }]
-    const res = writeMcpConfig(servers)
+    const servers: McpServer[] = [
+      { name: 'Chrome DevTools', command: 'npx', args: [], env: [] },
+      { type: 'http', name: 'remote', url: 'https://example.com/mcp', headers: [] }
+    ]
+    const res = writeMcpConfig(servers, { auth: { remote: { bearerTokenEnv: 'REMOTE_TOKEN' } } })
     assert.ok(res.handle)
     const path = res.handle!.path
     // Not in the project's pi config namespace — a temp file.
     assert.equal(path.includes(join(cwd, '.pi')), false)
     assert.ok(existsSync(path))
     const parsed = JSON.parse(readFileSync(path, 'utf-8'))
-    assert.equal(parsed._generatedBy, 'pi-acp')
-    assert.ok(parsed.mcpServers.chrome)
+    const registrations: Record<string, unknown> = {}
+    registerAcpMcp(
+      {
+        registerMcpServer: (name, config) => {
+          registrations[name] = config
+        }
+      },
+      { [MCP_CONFIG_ENV]: path }
+    )
+    assert.deepEqual(registrations, parsed.mcpServers)
+    assert.ok(registrations['Chrome-DevTools'])
+    assert.equal(parsed.mcpServers.remote.headers.Authorization, 'Bearer ${REMOTE_TOKEN}')
     // We never touch the project's .pi/mcp.json.
     assert.equal(existsSync(join(cwd, '.pi', 'mcp.json')), false)
     // Owner-only perms — the file can carry client-provided header/env secrets.
     if (process.platform !== 'win32') {
       assert.equal(statSync(path).mode & 0o777, 0o600)
+      assert.equal(statSync(dirname(path)).mode & 0o777, 0o700)
     }
 
     res.handle!.cleanup()
     assert.equal(existsSync(path), false)
+    assert.equal(existsSync(dirname(path)), false)
+    res.handle!.cleanup() // Session shutdown can be requested more than once.
   } finally {
     rmSync(cwd, { recursive: true, force: true })
   }
@@ -185,12 +202,18 @@ test('loadMcpPolicy: parses generate/exclude/auth; missing file → {}', () => {
   }
 })
 
-test('translateMcpServers: client display names become pi-safe server names', () => {
+test('translateMcpServers: client display names become pi-safe server names without replacing a colliding server', () => {
   const servers: McpServer[] = [
     { name: 'Chrome DevTools', command: 'npx', args: [], env: [] },
-    { type: 'http', name: '  !!! ', url: 'http://localhost:1/mcp', headers: [] }
+    { type: 'http', name: 'Chrome-DevTools', url: 'http://localhost:1/mcp', headers: [] },
+    { type: 'http', name: 'Chrome_DevTools', url: 'http://localhost:2/mcp', headers: [] },
+    { type: 'http', name: '  !!! ', url: 'http://localhost:3/mcp', headers: [] },
+    { name: '__proto__', command: 'custom-server', args: [], env: [] }
   ]
-  const { config } = translateMcpServers(servers)
-  assert.deepEqual(Object.keys(config.mcpServers), ['Chrome-DevTools'])
+  const { config, skipped } = translateMcpServers(servers)
+  assert.deepEqual(Object.keys(config.mcpServers), ['Chrome-DevTools', '__proto__'])
+  assert.deepEqual(config.mcpServers['Chrome-DevTools'], { command: 'npx', args: [] })
+  assert.deepEqual(config.mcpServers.__proto__, { command: 'custom-server', args: [] })
+  assert.deepEqual(skipped, ['Chrome-DevTools', 'Chrome_DevTools', '!!!'])
   assert.equal(toPiServerName('my.server/v2'), 'my-server-v2')
 })

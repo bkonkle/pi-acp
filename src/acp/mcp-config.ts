@@ -19,14 +19,14 @@ export type PiMcpConfig = {
 
 export type McpTranslation = {
   config: PiMcpConfig
-  /** Names of servers we could not express in pi's `mcpServers` schema (sse / acp). */
+  /** Names rejected by the native schema or colliding with another server's tool namespace. */
   skipped: string[]
-  /** Names skipped because a policy said to defer to the user's own (lower-precedence) config. */
+  /** Names skipped because a policy said to defer to the user's own config. */
   preserved: string[]
 }
 
 /**
- * Policy consulted when generating `.pi/mcp.json`, loaded from
+ * Policy consulted when generating the session-private MCP config, loaded from
  * `<pi-acp dataDir>/mcp-policy.json` (default `~/.pi/pi-acp/mcp-policy.json`).
  *
  * Why: the ACP `McpServer` shape can't express bearer auth, so a client-sent server may arrive
@@ -37,7 +37,7 @@ export type McpTranslation = {
  *
  *  - `generate`: which servers pi-acp may write. `true`/`"*"`/omitted = all (default, current
  *    behavior), `string[]` = only those names, `false` = none. Servers NOT generated are
- *    **preserved** — pi-acp leaves the user's own (lower-precedence) `mcp.json` entry and its auth
+ *    **preserved** — pi-acp leaves the user's own `mcp.json` entry and its auth
  *    in place. (Names are case-insensitive.)
  *  - `exclude`: denylist applied after `generate` (exclude wins) — e.g. a globally-configured,
  *    bearer-auth'd server you never want pi-acp to override.
@@ -130,19 +130,31 @@ export function translateMcpServers(
   servers: readonly McpServer[] | undefined | null,
   policy: McpPolicy = {}
 ): McpTranslation {
-  const mcpServers: Record<string, PiMcpEntry> = {}
+  const mcpServers = new Map<string, PiMcpEntry>()
+  const namespaces = new Set<string>()
   const skipped: string[] = []
   const preserved: string[] = []
 
   for (const server of servers ?? []) {
     const name = String(server.name ?? '').trim()
     const key = toPiServerName(name)
-    if (!name || !key) continue
+    if (!name) continue
+    if (!key) {
+      skipped.push(name)
+      continue
+    }
 
     if (!shouldGenerate(name, policy)) {
       // Not in the generate allowlist (or excluded) — leave the user's existing mcp.json entry
       // (and its auth) in place rather than overriding it.
       preserved.push(name)
+      continue
+    }
+
+    // Pi normalizes '-' to '_' in tool namespaces. Never silently replace a server or its auth.
+    const namespace = key.replace(/-/g, '_')
+    if (namespaces.has(namespace)) {
+      skipped.push(name)
       continue
     }
 
@@ -162,7 +174,7 @@ export function translateMcpServers(
       }
       const env = toRecord(stdio.env)
       if (Object.keys(env).length) entry.env = env
-      mcpServers[key] = entry
+      mcpServers.set(key, entry)
     } else if (type === 'http') {
       const http = server as { url?: string; headers?: NameValue[] }
       const url = String(http.url ?? '').trim()
@@ -176,14 +188,16 @@ export function translateMcpServers(
       const headers: Record<string, string> = { ...toRecord(http.headers), ...(rule?.headers ?? {}) }
       if (rule?.bearerTokenEnv) headers['Authorization'] = `Bearer \${${rule.bearerTokenEnv}}`
       if (Object.keys(headers).length) entry.headers = headers
-      mcpServers[key] = entry
+      mcpServers.set(key, entry)
     } else {
       // sse / acp: pi supports only stdio and streamable HTTP.
       skipped.push(name)
+      continue
     }
+    namespaces.add(namespace)
   }
 
-  return { config: { mcpServers, _generatedBy: GENERATED_MARKER }, skipped, preserved }
+  return { config: { mcpServers: Object.fromEntries(mcpServers), _generatedBy: GENERATED_MARKER }, skipped, preserved }
 }
 
 export type McpConfigHandle = {

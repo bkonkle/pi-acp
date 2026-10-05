@@ -1268,4 +1268,86 @@ test('PiAcpSession: codemode inner calls stay inside the codemode card', async (
   assert.equal(updates[1].content[0].content.text, '… bash {"command":"echo one"}')
   assert.equal(updates[2].status, 'completed')
   assert.equal(updates[2].content[0].content.text, '✓ bash {"command":"echo one"} 16ms\n\n"one\\n"')
+
+  proc.emit({
+    type: 'message_end',
+    message: {
+      role: 'toolResult',
+      toolCallId: 'c1',
+      toolName: 'codemode',
+      content: [],
+      details: { calls: [done] },
+      nestedCalls: {
+        complete: true,
+        calls: [{ id: 'c1/1', name: 'bash', status: 'ok', arguments: { command: 'echo one' } }]
+      }
+    }
+  })
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(conn.updates.length, 3, 'the durable record does not duplicate already-rendered codemode calls')
+})
+
+test('PiAcpSession: non-codemode parents retain failed and deeper nested calls in their final card', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+  proc.emit({ type: 'tool_execution_start', toolCallId: 'd', toolName: 'delegate', args: {} })
+  for (const [id, parent, name] of [
+    ['d/1', 'd', 'helper'],
+    ['d/1/1', 'd/1', 'mcp__agent_memory__get_memory']
+  ]) {
+    proc.emit({ type: 'tool_execution_start', toolCallId: id, toolName: name, args: {}, parentToolCallId: parent })
+    proc.emit({
+      type: 'tool_execution_end',
+      toolCallId: id,
+      toolName: name,
+      isError: true,
+      result: { content: [{ type: 'text', text: 'fixture failure' }] },
+      parentToolCallId: parent
+    })
+  }
+  const result = { content: [{ type: 'text', text: 'delegation failed' }] }
+  proc.emit({ type: 'tool_execution_end', toolCallId: 'd', toolName: 'delegate', result, isError: true })
+  proc.emit({
+    type: 'message_end',
+    message: {
+      ...result,
+      role: 'toolResult',
+      toolCallId: 'd',
+      toolName: 'delegate',
+      isError: true,
+      nestedCalls: {
+        complete: true,
+        calls: [
+          { id: 'd/1', name: 'helper', arguments: {}, status: 'error', error: 'fixture failure' },
+          {
+            id: 'd/1/1',
+            name: 'mcp__agent_memory__get_memory',
+            arguments: { id: 'fixture' },
+            status: 'error',
+            error: 'fixture failure'
+          }
+        ]
+      }
+    }
+  })
+  await new Promise(r => setTimeout(r, 0))
+  const updates = conn.updates.map(u => u.update as any)
+  assert.deepEqual(
+    updates.map(u => u.toolCallId),
+    ['d', 'd', 'd'],
+    'nested events never create extra cards'
+  )
+  assert.equal(updates[2].status, 'failed')
+  assert.match(updates[2].content[0].content.text, /✗ helper/)
+  assert.match(updates[2].content[0].content.text, /✗ agent_memory\/get_memory \{"id":"fixture"\}/)
+  assert.match(updates[2].content[0].content.text, /delegation failed$/)
+  session.dispose()
 })

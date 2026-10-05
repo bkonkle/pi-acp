@@ -30,6 +30,18 @@ reply cannot keep an earlier response visible. The npm artifact includes the sou
 required by its advertised extension entry points. Tests import those entry points from an actual
 packed tarball; `smoke:package` additionally loads them using the real Pi resource loader.
 
+## Pi 1.0.2 cross-machine reconciliation
+
+Keep the bundled `acp-mcp` bridge and codemode rendering from `9f0e254`, rather than generating
+an extension beside every session's config. Retain the local private-overlay round-trip checks
+and document the full Pi/Zed restart needed after an in-place Pi upgrade.
+
+Sanitized server names cannot silently replace another server's connection or credentials,
+including `-`/`_` namespace collisions. Codemode output blocks stay separated on success and
+failure. Final cards and replay also use Pi's durable `nestedCalls` record when the parent has
+no `details.calls` or it omits deeper calls; matching ids retain codemode's richer statuses,
+and model calls remain visible. Summaries still show the latest 20 calls, not standalone rows.
+
 ## Historical native-header-only approach (superseded by paired rows)
 
 The previous synthetic cards embedded up to 32,000 characters of transcript on every update.

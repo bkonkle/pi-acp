@@ -40,9 +40,11 @@ On top of upstream it adds (including George Harker's changes):
   `elicitation/create` when the client advertises `elicitation.form` (Zed 1.12+); other clients
   keep the cancel-with-note fallback.
 - **MCP auto-configuration** — ACP `mcpServers` are registered with pi's built-in MCP support
-  (pi >= 0.99) for the session. See [MCP servers](#mcp-servers).
+  (Pi 1.0+) for the session. See [MCP servers](#mcp-servers).
 - **Codemode cards** — a `codemode` call is one card listing the tools its script called, with
   their status, followed by the script output. Calls made inside the script are not separate cards.
+  Pi's durable nested-call records preserve deeper calls and non-codemode parent summaries on
+  completion and history replay.
 - **Multi-root workspaces** — additional workspace roots on `session/new` / `session/load`
   (`sessionCapabilities.additionalDirectories`), communicated to pi via `--append-system-prompt`.
 - **v2-oriented session capabilities** — advertises `session/resume`, `session/close`, and
@@ -90,8 +92,11 @@ npm install -g @earendil-works/pi-coding-agent
 ```
 
 - Node.js 22+
-- `pi` v0.80.4+ installed and available on your `PATH` (the adapter runs the `pi` executable)
+- Pi 1.0+ installed and available on your `PATH` (tested with 1.0.2; the adapter runs the `pi` executable)
 - Configure `pi` separately for your model providers/API keys
+
+After upgrading Pi, fully quit and reopen Zed (or restart its Pi agent). `/reload` reloads extensions,
+not the running Node process; an old process may reference bundle files removed by the upgrade.
 
 ## Install
 
@@ -442,10 +447,11 @@ environment variable.
 MCP servers passed by the ACP client (`session/new`, `session/load`, `session/resume`) are translated
 into a **session-scoped temp file**. Its path is passed to the spawned pi in `PI_ACP_MCP_CONFIG`, and
 the bundled `acp-mcp` extension registers each server with `pi.registerMcpServer()`. This needs pi's
-built-in MCP support (pi >= 0.99; remove `pi-mcp-adapter`, which replaces it). stdio and http servers
+built-in MCP support (Pi 1.0+; remove `pi-mcp-adapter`, which replaces it). stdio and http servers
 are supported; sse/acp servers cannot be expressed and are skipped. Client display names are turned
-into pi-safe server names (`Chrome DevTools` → `Chrome-DevTools`). The temp file is removed when the
-session closes.
+into pi-safe server names (`Chrome DevTools` → `Chrome-DevTools`). If names collide after sanitizing
+or Pi's `-` → `_` namespace normalization, the first valid server wins and later ones are skipped,
+never silently replacing its connection or credentials. The temp file is removed when the session closes.
 
 Registered servers last only as long as the pi process and are never written to `mcp.json`. A server
 with the same name in your `~/.pi/agent/mcp.json` (or a trusted project's `.pi/mcp.json`) takes
@@ -485,7 +491,8 @@ subagent tool/extension inheritance — create `~/.pi/pi-acp/mcp-policy.json` (u
 - **`auth`** — for a server pi-acp _does_ register, write `Authorization: Bearer ${<VAR>}` (+ extra
   headers). pi resolves `${VAR}` when it connects, so the token is never written to disk.
 
-Names are case-insensitive. Note the ACP MCP shape has no dedicated auth field, so bearer auth can
+`generate`/`exclude` names are case-insensitive; `auth` keys use the original client name.
+Note the ACP MCP shape has no dedicated auth field, so bearer auth can
 only travel as an HTTP header — either provided by the client in the server's `headers`, or added via
 this policy's `auth`.
 

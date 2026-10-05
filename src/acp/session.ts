@@ -29,7 +29,7 @@ import {
   bashTerminalOutputMeta,
   isBashTool
 } from './translate/bash.js'
-import { toolResultToText } from './translate/pi-tools.js'
+import { needsNestedCallSummary, toolResultToText } from './translate/pi-tools.js'
 import { compactSubagentText, isSubagentInvocationTool, subagentDisplayInput } from './translate/subagent-tools.js'
 import { getDefaultModel, getPiAcpDebug } from './pi-acp-settings.js'
 import {
@@ -1304,7 +1304,30 @@ export class PiAcpSession {
         // pi encodes provider/auth failures as a completed AgentMessage with
         // stopReason "error" (docs/rpc.md) rather than a separate RPC error event.
         // Surface it as visible text; otherwise the turn silently ends with no content.
-        const message = (ev as any).message as Record<string, unknown> | undefined
+        const message = ev.message as Record<string, unknown> | undefined
+        // Pi attaches its durable nested-call record after tool_execution_end. Add deeper calls
+        // or summaries for non-codemode parents without recreating hidden Agent or terminal rows.
+        if (message?.role === 'toolResult' && needsNestedCallSummary(message)) {
+          const toolCallId = stringProp(message, 'toolCallId')
+          const toolName = stringProp(message, 'toolName')
+          if (
+            toolCallId &&
+            toolName &&
+            !isSubagentInvocationTool(toolName) &&
+            !isBashTool(toolName) &&
+            toolName !== 'edit' &&
+            toolName !== 'write'
+          ) {
+            const text = toolResultToText(message)
+            this.emit({
+              sessionUpdate: 'tool_call_update',
+              toolCallId,
+              status: message.isError ? 'failed' : 'completed',
+              content: text ? [{ type: 'content', content: { type: 'text', text } }] : null,
+              rawOutput: message
+            })
+          }
+        }
         const stopReason = message ? stringProp(message, 'stopReason') : null
         const errorMessage = message ? stringProp(message, 'errorMessage') : null
         if (stopReason === 'error' && errorMessage) {
